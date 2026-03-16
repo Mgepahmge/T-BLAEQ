@@ -34,6 +34,7 @@ set(CUDA_SOURCES
         src/Query/Query.cu
         src/Kmeans/CUDAKmeans.cu
         src/utils/NVTXProfiler.cu
+        src/utils/Utils.cu
         src/Test/QueryTest.cu
         src/main.cu
 )

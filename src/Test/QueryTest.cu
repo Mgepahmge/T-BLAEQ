@@ -11,43 +11,7 @@
 #include <thrust/device_vector.h>
 #include <raft/core/device_mdarray.hpp>
 #include "src/func.hpp"
-
-// 提取数据集名称（如 "gist", "sift"）
-std::string extractDatasetName(const std::string& path) {
-    size_t start = path.find_last_of('/') + 1;
-    size_t end = path.find('_', start);
-    return path.substr(start, end - start);
-}
-
-// 提取范围百分比（如 10, 30, 50...）
-int extractRangePercentage(const std::string& path) {
-    size_t pos = path.find_last_of('_') + 1;
-    size_t dotPos = path.find('.', pos);
-    return std::stoi(path.substr(pos, dotPos - pos));
-}
-
-std::string extractRangeInfo(const std::string& path) {
-    size_t pos = path.find_last_of('_') + 1;
-    size_t dotPos = path.find('.', pos);
-    std::string rangeStr = path.substr(pos, dotPos - pos);
-
-    size_t dashPos = rangeStr.find('-');
-    if (dashPos != std::string::npos) {
-        int percentage = std::stoi(rangeStr.substr(0, dashPos));
-        int dimensions = std::stoi(rangeStr.substr(dashPos + 1));
-
-        // 计算实际覆盖率
-        double actualCoverage = std::pow(percentage / 100.0, dimensions) * 100.0;
-
-        std::ostringstream oss;
-        oss << percentage << "%^" << dimensions << "="
-            << std::fixed << std::setprecision(2) << actualCoverage << "%";
-        return oss.str();
-    }
-
-    // 如果没有找到'-'，返回原格式
-    return rangeStr + "%";
-}
+#include "src/utils/Utils.cuh"
 
 void testQueriesAndSaveResults(const std::string& outputFile, int maxQueryCount,
                               bool loadFromIndex, const std::string& indexPath,

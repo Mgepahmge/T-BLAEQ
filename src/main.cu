@@ -47,6 +47,9 @@ int main(int argc, char** argv) {
     int k = 10;
     app.add_option("-k,--knn-k", k, "Number of neighbors for KNN query (default: 10)");
 
+    std::string resultPath = "tempResult.csv";
+    app.add_option("-r,--result-path", resultPath, "Path to save query results (default: tempResult.csv)");
+
     CLI11_PARSE(app, argc, argv);
 
     if (buildIndexFlag) {
@@ -63,9 +66,8 @@ int main(int argc, char** argv) {
         } else {
             throw std::runtime_error("Unsupported query type: " + std::to_string(queryType));
         }
-        std::cout << "Completed: " << result.queryCount << " queries." << std::endl;
-        std::cout << "Total: " << result.totalTime << " μs." << std::endl;
-        std::cout << "Average: " << (result.totalTime / result.queryCount) << " μs per query." << std::endl;
+        saveQueryResult(result, resultPath);
+        std::cout << "Query results saved to: " << resultPath << std::endl;
     }
     return 0;
 }

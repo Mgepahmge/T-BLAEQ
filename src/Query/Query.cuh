@@ -18,6 +18,10 @@ struct QueryResult {
     std::vector<double> queryRangeVolume; // 每次查询的查询范围体积，以对数值存储s
     std::vector<size_t> fineMeshSize; // 每次查询得到的最细层网格大小（非零元数量）
     std::vector<GridAsSparseMatrix*> fineMesh; // 最终得到的最细层网格
+    std::string datasetName = ""; // Dataset Name
+    std::string queryParam = ""; // Query Parameter (e.g., "50%^1=50.00%" for range query, "K=3" for KNN query)
+    size_t datasetSize = 0; // Dataset Size
+    size_t datasetDim = 0; // Dataset Dimension
 };
 
 class QueryHandler {
@@ -74,6 +78,7 @@ private:
     Multidimensional_Arr dataset;
     size_t D;
     size_t N;
+    std::string datasetName = "";
 
     // Index structure
     size_t GPU_Index_Height;
@@ -101,5 +106,7 @@ std::string formatLogVolume(double l_volume);
 std::string getQueryProfilerName(QueryType type, size_t N, size_t D);
 
 bool checkRangeQuery(const double* data, const double* lowBounds, const double* upBounds, const double* radius, const size_t* indexes, const size_t length, const size_t numNNZ, const size_t dim);
+
+void saveQueryResult(const QueryResult& result, const std::string& outputFile);
 
 #endif //BLAEQ_CUDA_QUERY_CUH

@@ -11,6 +11,7 @@
 #include "src/Kernel/SpMSpV.cuh"
 #include "src/func.hpp"
 #include "src/utils/NVTXProfiler.cuh"
+#include "src/utils/Utils.cuh"
 
 namespace debug {
     void save_cluster_data(const double* centers,      // CPU端聚类中心 (n*d)
@@ -96,6 +97,9 @@ QueryResult::~QueryResult() {
 QueryHandler::QueryHandler(const std::string& datasetPath) {
     std::cout << "T-BLAEQ Building Index!" << std::endl;
     std::cout << std::filesystem::current_path().string() << std::endl;
+
+    // Get Dataset Name
+    datasetName = extractDatasetName(datasetPath);
 
     // Initialize parameters
     ratios = new size_t[3]{100, 50, 20};
@@ -551,6 +555,15 @@ QueryResult QueryHandler::performQueryWithPreLoadPvals(const std::string& queryP
 
     result.totalTime = totalTime;
     result.queryCount = queryCount;
+    result.datasetName = datasetName;
+
+    if (QueryType == 0) {
+        result.queryParam = extractRangeInfo(queryPath);
+    } else if (QueryType == 1) {
+        result.queryParam = "K=" + std::to_string(K);
+    }
+    result.datasetSize = N;
+    result.datasetDim = D;
     return result;
 }
 
@@ -585,6 +598,9 @@ QueryHandler::QueryHandler(const std::string& indexPath, bool loadFromIndex) {
     if (!loadFromIndex) {
         throw std::invalid_argument("Use QueryHandler(datasetPath) for building new index");
     }
+
+    // Get Dataset Name
+    datasetName = extractDatasetName(indexPath);
 
     std::cout << "Loading index from: " << indexPath << std::endl;
     auto t1 = std::chrono::steady_clock::now();
@@ -1122,4 +1138,91 @@ bool checkRangeQuery(const double* data, const double* lowBounds, const double* 
         delete [] h_indexes;
     }
     return result;
+}
+
+void saveQueryResult(const QueryResult& result, const std::string& outputFile) {
+
+    if (result.errorCode != 0) {
+        std::cerr << "QueryResult has error code: " << result.errorCode << ", skipping save." << std::endl;
+        return;
+    }
+
+    bool isOutputFileExists = std::filesystem::exists(outputFile);
+    std::ofstream outFile(outputFile, isOutputFileExists ? std::ios::app : std::ios::out);
+    if (!outFile.is_open()) {
+        std::cerr << "Failed to open output file: " << outputFile << std::endl;
+        return;
+    }
+
+    if (!isOutputFileExists) {
+        outFile << std::left
+            << "Dataset,"
+            << "Size,"
+            << "Dim,"
+            << "Query Type,"
+            << "Query Parameter,"
+            << "Query Count,"
+            << "Total Time (ms),"
+            << "Avg Time (ms),"
+            << "Median Log Volume,"
+            << "Avg Range Volume,"
+            << "Avg Fine Mesh"
+            << std::endl;
+    }
+
+    double totalTimeMs = result.totalTime / 1000.0;
+    double avgTimeMs = (result.queryCount > 0) ? (totalTimeMs / result.queryCount) : 0.0;
+
+    std::string medianLogVolumeStr = "N/A";
+    std::string avgVolumeStr = "N/A";
+    if (!result.queryRangeVolume.empty()) {
+        std::vector<double> sortedVolumes = result.queryRangeVolume;
+        std::sort(sortedVolumes.begin(), sortedVolumes.end());
+
+        double medianLogVolume;
+        size_t n = sortedVolumes.size();
+        if (n % 2 == 0) {
+            medianLogVolume = (sortedVolumes[n/2 - 1] + sortedVolumes[n/2]) / 2.0;
+        } else {
+            medianLogVolume = sortedVolumes[n/2];
+        }
+
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(3) << medianLogVolume;
+        medianLogVolumeStr = oss.str();
+
+        avgVolumeStr = formatLogVolume(medianLogVolume);
+    }
+
+    std::string avgFineMeshStr = "N/A";
+    if (!result.fineMeshSize.empty()) {
+        double avgFineMesh = 0.0;
+        for (size_t size : result.fineMeshSize) {
+            avgFineMesh += size;
+        }
+        avgFineMesh /= result.fineMeshSize.size();
+
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(1) << avgFineMesh;
+        avgFineMeshStr = oss.str();
+    }
+
+    std::string queryTypeStr = (result.type == QueryType::POINT) ? "POINT (KNN)" : "RANGE";
+
+    outFile << std::left
+        << result.datasetName << ","
+        << result.datasetSize << ","
+        << result.datasetDim << ","
+        << queryTypeStr << ","
+        << result.queryParam << ","
+        << result.queryCount << ","
+        << std::fixed << std::setprecision(3) << totalTimeMs << ","
+        << std::fixed << std::setprecision(6) << avgTimeMs << ","
+        << medianLogVolumeStr << ","
+        << avgVolumeStr << ","
+        << avgFineMeshStr
+        << std::endl;
+
+    outFile.close();
+    std::cout << "Result saved to: " << outputFile << std::endl;
 }
