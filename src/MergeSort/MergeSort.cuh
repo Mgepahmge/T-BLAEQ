@@ -1,19 +1,47 @@
+/**
+ * @file MergeSort.cuh
+ * @brief GPU block merge sort kernel, host parallel/serial merge sort, and gpuSort wrapper.
+ *
+ * @details This file provides the sorting infrastructure used by the KNN pruning
+ * pipeline.  The main components are:
+ *
+ * blockMergeSortKernel - CUDA kernel that performs an in-register bitonic/merge
+ *   sort within each thread block.  Produces block-sorted segments which are
+ *   then merged by hostSerialMergeSort on the host.
+ *
+ * hostSerialMergeSort - Host-side merge of block-sorted segments using a
+ *   priority queue.  Used by knnPruning (L0/L1/L2) and runKnnPruningTiled (L3).
+ *
+ * gpuSort - Convenience wrapper: detects input/output memory location,
+ *   launches blockMergeSortKernel, then calls hostSerialMergeSort if there
+ *   are multiple blocks.  Used by knnPruning for L0/L1/L2 strategies.
+ *
+ * MemoryLocation - enum used by detectMemoryLocation to classify a pointer.
+ */
+
 #ifndef CUDADB_MERGESORT_CUH
 #define CUDADB_MERGESORT_CUH
 
+#include <condition_variable>
+#include <cstring>
 #include <cuda_runtime.h>
 #include <limits>
+#include <mutex>
+#include <queue>
 #include <thread>
 #include <vector>
-#include <cstring>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
 
+/**
+ * @enum MemoryLocation
+ * @brief Classification of a pointer's memory residency.
+ *
+ * @details Used by detectMemoryLocation and gpuSort to decide whether a
+ * buffer needs to be copied before or after a kernel launch.
+ */
 enum class MemoryLocation {
-    Host,
-    Device,
-    Unified
+    Host, //!< Standard host (pageable or pinned) memory.
+    Device, //!< Device memory allocated via cudaMalloc.
+    Unified //!< Unified/managed memory accessible from both host and device.
 };
 
 template <typename T>
@@ -26,14 +54,14 @@ __device__ __forceinline__ T cudaMax(T a, T b) {
     return a < b ? b : a;
 }
 
-/**
- * @brief Generic warp shuffle operation that works with any type by decomposing into 32-bit chunks.
- * 
- * @tparam T The type of the value to shuffle.
- * @param[in] val The value to shuffle.
- * @param[in] srcLane The source lane to read from.
- * @param[in] mask The warp participation mask.
- * @return The shuffled value from the specified source lane.
+/*!
+ * @brief Generic warp shuffle that works with any type by decomposing into 32-bit chunks.
+ *
+ * @tparam T       Type of the value to shuffle (may be larger than 32 bits).
+ * @param[in] val      Value to shuffle.
+ * @param[in] srcLane  Source lane index to read from.
+ * @param[in] mask     Warp participation mask (default: all lanes).
+ * @return The value from srcLane broadcast to the calling lane.
  */
 template <typename T>
 __device__ __forceinline__ T shflSync(T val, int srcLane, unsigned mask = 0xffffffff) {
@@ -56,14 +84,14 @@ __device__ __forceinline__ T shflSync(T val, int srcLane, unsigned mask = 0xffff
     return output.value;
 }
 
-/**
+/*!
  * @brief Generic warp shuffle XOR operation for any type.
  *
- * @tparam T The type of the value to shuffle.
- * @param[in] val The value to shuffle.
- * @param[in] laneMask The XOR mask to compute target lane.
- * @param[in] mask The warp participation mask.
- * @return The shuffled value from the XOR'd lane.
+ * @tparam T          Type of the value to shuffle.
+ * @param[in] val      Value to shuffle.
+ * @param[in] laneMask XOR mask applied to threadIdx to identify the source lane.
+ * @param[in] mask     Warp participation mask (default: all lanes).
+ * @return The shuffled value from the XOR-identified lane.
  */
 template <typename T>
 __device__ __forceinline__ T shflXorSync(T val, int laneMask, unsigned mask = 0xffffffff) {
@@ -168,11 +196,8 @@ __device__ __forceinline__ T warpSort(T val) {
  * @return The index in Array A representing the split point.
  */
 template <typename T, bool Ascending>
-__device__ __forceinline__ int mergePathIntersectionShared(
-    const T* sharedData,
-    const int startA, const int lenA,
-    const int startB, const int lenB,
-    const int diag) {
+__device__ __forceinline__ int mergePathIntersectionShared(const T* sharedData, const int startA, const int lenA,
+                                                           const int startB, const int lenB, const int diag) {
     int xMin = max(0, diag - lenB);
     int xMax = min(diag, lenA);
 
@@ -246,9 +271,8 @@ __global__ void blockMergeSortKernel(const T* __restrict__ inputData, T* __restr
             const int startA = pairIdx * mergedSize;
             const int startB = startA + width;
 
-            const int aSplit = mergePathIntersectionShared<T, Ascending>(
-                sharedData, startA, width, startB, width, localDiag
-            );
+            const int aSplit =
+                mergePathIntersectionShared<T, Ascending>(sharedData, startA, width, startB, width, localDiag);
             const int bSplit = localDiag - aSplit;
 
             T valA = (aSplit < width) ? sharedData[startA + aSplit] : paddingVal;
@@ -433,7 +457,9 @@ namespace cudaDatabaseMergeSort {
 
         GlobalThreadPool() : stop(false), activeTasks(0), pendingTasks(0) {
             size_t numThreads = std::thread::hardware_concurrency();
-            if (numThreads == 0) numThreads = 4;
+            if (numThreads == 0) {
+                numThreads = 4;
+            }
 
             for (size_t i = 0; i < numThreads; ++i) {
                 workers.emplace_back([this] {
@@ -441,9 +467,7 @@ namespace cudaDatabaseMergeSort {
                         std::function<void()> task;
                         {
                             std::unique_lock<std::mutex> lock(this->queueMutex);
-                            this->condition.wait(lock, [this] {
-                                return this->stop || !this->tasks.empty();
-                            });
+                            this->condition.wait(lock, [this] { return this->stop || !this->tasks.empty(); });
 
                             if (this->stop && this->tasks.empty()) {
                                 return;
@@ -484,7 +508,6 @@ namespace cudaDatabaseMergeSort {
         }
 
     public:
-        // 禁止拷贝和赋值
         GlobalThreadPool(const GlobalThreadPool&) = delete;
         GlobalThreadPool& operator=(const GlobalThreadPool&) = delete;
 
@@ -505,12 +528,10 @@ namespace cudaDatabaseMergeSort {
 
         void wait() {
             std::unique_lock<std::mutex> lock(queueMutex);
-            completionCondition.wait(lock, [this] {
-                return this->pendingTasks == 0 && this->activeTasks == 0;
-            });
+            completionCondition.wait(lock, [this] { return this->pendingTasks == 0 && this->activeTasks == 0; });
         }
     };
-}
+} // namespace cudaDatabaseMergeSort
 
 /**
  * @brief Thread pool-based merge sort on the host.
@@ -540,7 +561,8 @@ void hostThreadPoolMergeSort(T* data, int n, int blockSize) {
 
                 if (mid < right) {
                     parallelMerge<T, Ascending>(src, dst, left, mid, right);
-                } else {
+                }
+                else {
                     for (int i = left; i < mid; ++i) {
                         dst[i] = src[i];
                     }

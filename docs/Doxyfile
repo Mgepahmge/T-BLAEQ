@@ -1,0 +1,135 @@
+#---------------------------------------------------------------------------
+# Project metadata
+#---------------------------------------------------------------------------
+
+PROJECT_NAME           = "T-BLAEQ"
+PROJECT_BRIEF          = "GPU-accelerated hierarchical mesh index for range and KNN queries"
+PROJECT_NUMBER         = "1.0"
+
+OUTPUT_DIRECTORY       = .
+HTML_OUTPUT            = html
+
+#---------------------------------------------------------------------------
+# Input
+#---------------------------------------------------------------------------
+
+INPUT                  = ../src \
+                         mainpage.md \
+                         memory_policies.md \
+                         query_pipeline.md
+
+INPUT_ENCODING         = UTF-8
+FILE_PATTERNS          = *.cuh *.cu *.hpp *.h *.md
+EXTENSION_MAPPING      = cu=C++ cuh=C++
+RECURSIVE              = YES
+
+# Exclude legacy / test files
+EXCLUDE_PATTERNS       = */QueryTest* \
+                         */func.hpp  \
+                         */CLI11.hpp
+
+USE_MDFILE_AS_MAINPAGE = mainpage.md
+
+#---------------------------------------------------------------------------
+# Extraction settings
+#---------------------------------------------------------------------------
+
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+
+JAVADOC_AUTOBRIEF      = NO
+QT_AUTOBRIEF           = NO
+
+MULTILINE_CPP_IS_BRIEF = NO
+
+INHERIT_DOCS           = YES
+
+#---------------------------------------------------------------------------
+# Build options
+#---------------------------------------------------------------------------
+
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = NO
+
+PREDEFINED             = __global__= \
+                         __device__= \
+                         __host__=   \
+                         __forceinline__=
+
+SKIP_FUNCTION_MACROS   = YES
+
+#---------------------------------------------------------------------------
+# Source browsing
+#---------------------------------------------------------------------------
+
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+#---------------------------------------------------------------------------
+# HTML output
+#---------------------------------------------------------------------------
+
+GENERATE_HTML          = YES
+HTML_DYNAMIC_SECTIONS  = YES
+GENERATE_TREEVIEW      = YES
+TREEVIEW_WIDTH         = 250
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+
+HTML_COLORSTYLE        = AUTO_LIGHT
+HTML_TIMESTAMP         = YES
+HTML_COPY_CLIPBOARD    = YES
+
+# Searchable documentation
+SEARCHENGINE           = YES
+SERVER_BASED_SEARCH    = NO
+
+#---------------------------------------------------------------------------
+# Other output formats (disabled)
+#---------------------------------------------------------------------------
+
+GENERATE_LATEX         = NO
+GENERATE_RTF           = NO
+GENERATE_MAN           = NO
+GENERATE_XML           = NO
+GENERATE_DOCBOOK       = NO
+
+#---------------------------------------------------------------------------
+# Dot / graph generation (requires graphviz)
+#---------------------------------------------------------------------------
+
+HAVE_DOT               = YES
+DOT_NUM_THREADS        = 4
+UML_LOOK               = NO
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = YES
+INCLUDE_GRAPH          = YES
+INCLUDED_BY_GRAPH      = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+GRAPHICAL_HIERARCHY    = YES
+DIRECTORY_DEPS         = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+DOT_CLEANUP            = YES
+
+#---------------------------------------------------------------------------
+# Warnings
+#---------------------------------------------------------------------------
+
+QUIET                  = NO
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = NO
+WARN_LOGFILE           = doxygen_warnings.log

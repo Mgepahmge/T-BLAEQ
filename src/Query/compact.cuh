@@ -1,12 +1,36 @@
-//
-// Created by Mgepahmge on 2025/12/8.
-//
+/**
+ * @file compact.cuh
+ * @brief Low-level CUDA kernels and launchers for warp-parallel stream compaction.
+ *
+ * @details This file provides the building blocks for GPU-accelerated stream
+ * compaction: a warp-level count kernel, a two-pass block-level inclusive
+ * prefix-sum, a scatter kernel, and a legacy CompactHandler class.
+ *
+ * The three-step pipeline used by GridCompact and L0/L3 strategies is:
+ *   1. launchCountKernel   - count selected elements per warp.
+ *   2. launchPrefixSumKernel - compute inclusive prefix-sum of warp counts.
+ *   3. gridCompactPrefixKernel (GridCompact.cuh) or compactPrefixKernel -
+ *      scatter selected elements to the output using the prefix-sum offsets.
+ */
 
 #ifndef CUDADB_COMPACT_CUH
 #define CUDADB_COMPACT_CUH
 
 #include "check.cuh"
 
+/*!
+ * @brief Count the number of non-zero (positive) elements per warp.
+ *
+ * @details Each warp processes Iter * 32 consecutive elements.  Counts are
+ * accumulated using warp-shuffle reduction and written to processorCounts
+ * at the warp index.  The result feeds launchPrefixSumKernel.
+ *
+ * @tparam T    Element type; elements with value > 0 are counted as selected.
+ * @tparam Iter Number of loop iterations per warp (= Kp / 32).
+ * @param[out] processorCounts Per-warp selected counts (device).
+ * @param[in]  inputData       Input array to count (device, dataSize elements).
+ * @param[in]  dataSize        Total number of input elements.
+ */
 template <typename T, int Iter>
 __global__ void countKernel(unsigned int* processorCounts, const T* inputData, unsigned int dataSize) {
     const auto idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -34,6 +58,16 @@ __global__ void countKernel(unsigned int* processorCounts, const T* inputData, u
     }
 }
 
+/*!
+ * @brief Launch countKernel with the grid dimensions derived from Kp and BLOCK_SIZE.
+ *
+ * @tparam T          Element type.
+ * @tparam Kp         Elements processed per warp (must be a multiple of 32).
+ * @tparam BLOCK_SIZE Threads per block.
+ * @param[out] dProcessorCounts Per-warp selected counts (device, ceil(dataSize/Kp) entries).
+ * @param[in]  dInputData       Input array (device).
+ * @param[in]  dataSize         Total number of input elements.
+ */
 template <typename T, int Kp, int BLOCK_SIZE>
 void launchCountKernel(unsigned int* dProcessorCounts, const T* dInputData, const unsigned int dataSize) {
     constexpr auto warpPerBlock = BLOCK_SIZE >> 5;
@@ -43,6 +77,20 @@ void launchCountKernel(unsigned int* dProcessorCounts, const T* dInputData, cons
     countKernel<T, Iter><<<gridSize, BLOCK_SIZE>>>(dProcessorCounts, dInputData, dataSize);
 }
 
+/*!
+ * @brief Block-level inclusive prefix-sum over per-warp counts (first pass).
+ *
+ * @details Computes an intra-warp scan, then an intra-block scan using shared
+ * memory.  Writes per-block totals to buffer for the final-scan pass.
+ * Must be followed by prefixSumFinalScanKernel to produce the globally
+ * correct inclusive prefix-sum.
+ *
+ * @tparam T            Counter type (typically unsigned int).
+ * @param[in,out] processorsCounts Per-warp counts; overwritten with block-local
+ *                                  inclusive prefix-sum (device).
+ * @param[out]    buffer            Per-block totals used by the final scan pass (device).
+ * @param[in]     processors        Total number of warps.
+ */
 template <typename T>
 __global__ void prefixSumKernel(T* processorsCounts, T* buffer, const unsigned int processors) {
     extern __shared__ T sharedBuffer[];
@@ -60,19 +108,29 @@ __global__ void prefixSumKernel(T* processorsCounts, T* buffer, const unsigned i
     T temp;
 
     temp = __shfl_up_sync(0xFFFFFFFF, localData, 1);
-    if (laneIdx >= 1) localData += temp;
+    if (laneIdx >= 1) {
+        localData += temp;
+    }
 
     temp = __shfl_up_sync(0xFFFFFFFF, localData, 2);
-    if (laneIdx >= 2) localData += temp;
+    if (laneIdx >= 2) {
+        localData += temp;
+    }
 
     temp = __shfl_up_sync(0xFFFFFFFF, localData, 4);
-    if (laneIdx >= 4) localData += temp;
+    if (laneIdx >= 4) {
+        localData += temp;
+    }
 
     temp = __shfl_up_sync(0xFFFFFFFF, localData, 8);
-    if (laneIdx >= 8) localData += temp;
+    if (laneIdx >= 8) {
+        localData += temp;
+    }
 
     temp = __shfl_up_sync(0xFFFFFFFF, localData, 16);
-    if (laneIdx >= 16) localData += temp;
+    if (laneIdx >= 16) {
+        localData += temp;
+    }
 
     const auto warpIdxBlock = threadIdx.x >> 5;
     const auto numWarpsBlock = blockDim.x >> 5;
@@ -88,19 +146,29 @@ __global__ void prefixSumKernel(T* processorsCounts, T* buffer, const unsigned i
         // intra-warp scan
         T tempTemp;
         tempTemp = __shfl_up_sync(0xFFFFFFFF, tempLocalData, 1);
-        if (laneIdx >= 1) tempLocalData += tempTemp;
+        if (laneIdx >= 1) {
+            tempLocalData += tempTemp;
+        }
 
         tempTemp = __shfl_up_sync(0xFFFFFFFF, tempLocalData, 2);
-        if (laneIdx >= 2) tempLocalData += tempTemp;
+        if (laneIdx >= 2) {
+            tempLocalData += tempTemp;
+        }
 
         tempTemp = __shfl_up_sync(0xFFFFFFFF, tempLocalData, 4);
-        if (laneIdx >= 4) tempLocalData += tempTemp;
+        if (laneIdx >= 4) {
+            tempLocalData += tempTemp;
+        }
 
         tempTemp = __shfl_up_sync(0xFFFFFFFF, tempLocalData, 8);
-        if (laneIdx >= 8) tempLocalData += tempTemp;
+        if (laneIdx >= 8) {
+            tempLocalData += tempTemp;
+        }
 
         tempTemp = __shfl_up_sync(0xFFFFFFFF, tempLocalData, 16);
-        if (laneIdx >= 16) tempLocalData += tempTemp;
+        if (laneIdx >= 16) {
+            tempLocalData += tempTemp;
+        }
         // write back
         if (laneIdx < numWarpsBlock) {
             sharedBuffer[laneIdx] = tempLocalData;
@@ -123,6 +191,19 @@ __global__ void prefixSumKernel(T* processorsCounts, T* buffer, const unsigned i
     }
 }
 
+/*!
+ * @brief Final-scan pass that adds inter-block offsets to produce a globally
+ *        correct inclusive prefix-sum.
+ *
+ * @details Reads per-block totals from buffer (produced by prefixSumKernel),
+ * accumulates the offset for each block, and adds it to the corresponding
+ * entries in processorsCounts.
+ *
+ * @tparam T            Counter type.
+ * @param[in,out] processorsCounts Block-local prefix-sum; updated to global (device).
+ * @param[in]     buffer            Per-block totals from prefixSumKernel (device).
+ * @param[in]     processors        Total number of warps.
+ */
 template <typename T>
 __global__ void prefixSumFinalScanKernel(T* processorsCounts, const T* buffer, const unsigned int processors) {
     __shared__ T sharedBuffer;
@@ -157,6 +238,20 @@ __global__ void prefixSumFinalScanKernel(T* processorsCounts, const T* buffer, c
     }
 }
 
+/*!
+ * @brief Run the two-pass prefix-sum (prefixSumKernel + prefixSumFinalScanKernel).
+ *
+ * @details Allocates a temporary dBuffer for inter-block totals, launches both
+ * kernel passes with cudaDeviceSynchronize between them, then frees dBuffer.
+ * After this call dProcessorCounts holds the globally correct inclusive
+ * prefix-sum, ready for use as output offsets in a scatter kernel.
+ *
+ * @tparam T          Counter type.
+ * @tparam BLOCK_SIZE Threads per block.
+ * @param[in,out] dProcessorCounts Per-warp counts on entry; global inclusive
+ *                                  prefix-sum on exit (device).
+ * @param[in]     processors        Number of warps (entries in dProcessorCounts).
+ */
 template <typename T, int BLOCK_SIZE>
 void launchPrefixSumKernel(T* dProcessorCounts, const unsigned int processors) {
     constexpr auto warpPerBlock = BLOCK_SIZE >> 5;
@@ -172,6 +267,20 @@ void launchPrefixSumKernel(T* dProcessorCounts, const unsigned int processors) {
     CUDA_CHECK(cudaFree(dBuffer));
 }
 
+/*!
+ * @brief Scatter positive elements to contiguous output positions.
+ *
+ * @details Each warp uses the prefix-sum offsets in processorCounts to scatter
+ * elements with value > 0 into outputData without gaps.  The output is a
+ * densely packed array of the selected elements in their original order.
+ *
+ * @tparam T    Element type; elements with value > 0 are scattered.
+ * @tparam Iter Number of loop iterations per warp (= Kp / 32).
+ * @param[out] outputData       Compacted output array (device).
+ * @param[in]  inputData        Input array (device, dataSize elements).
+ * @param[in]  processorCounts  Global inclusive prefix-sum of per-warp counts (device).
+ * @param[in]  dataSize         Total number of input elements.
+ */
 template <typename T, int Iter>
 __global__ void compactPrefixKernel(T* outputData, const T* inputData, const unsigned int* processorCounts,
                                     const unsigned int dataSize) {
@@ -194,15 +303,25 @@ __global__ void compactPrefixKernel(T* outputData, const T* inputData, const uns
         // prefix Sum
         unsigned int temp;
         temp = __shfl_up_sync(0xFFFFFFFF, localFlags, 1);
-        if (laneIdx >= 1) localFlags += temp;
+        if (laneIdx >= 1) {
+            localFlags += temp;
+        }
         temp = __shfl_up_sync(0xFFFFFFFF, localFlags, 2);
-        if (laneIdx >= 2) localFlags += temp;
+        if (laneIdx >= 2) {
+            localFlags += temp;
+        }
         temp = __shfl_up_sync(0xFFFFFFFF, localFlags, 4);
-        if (laneIdx >= 4) localFlags += temp;
+        if (laneIdx >= 4) {
+            localFlags += temp;
+        }
         temp = __shfl_up_sync(0xFFFFFFFF, localFlags, 8);
-        if (laneIdx >= 8) localFlags += temp;
+        if (laneIdx >= 8) {
+            localFlags += temp;
+        }
         temp = __shfl_up_sync(0xFFFFFFFF, localFlags, 16);
-        if (laneIdx >= 16) localFlags += temp;
+        if (laneIdx >= 16) {
+            localFlags += temp;
+        }
         if (localData > 0) {
             const auto outputIdx = outputBegin + localFlags - 1;
             outputData[outputIdx] = localData;
@@ -212,7 +331,18 @@ __global__ void compactPrefixKernel(T* outputData, const T* inputData, const uns
     }
 }
 
-template<typename T, int Kp, int BLOCK_SIZE>
+/*!
+ * @brief Launch compactPrefixKernel with grid dimensions derived from Kp and BLOCK_SIZE.
+ *
+ * @tparam T          Element type.
+ * @tparam Kp         Elements processed per warp.
+ * @tparam BLOCK_SIZE Threads per block.
+ * @param[out] dOutputData       Compacted output array (device).
+ * @param[in]  dInputData        Input array (device).
+ * @param[in]  dProcessorCounts  Global inclusive prefix-sum of per-warp counts (device).
+ * @param[in]  dataSize          Total number of input elements.
+ */
+template <typename T, int Kp, int BLOCK_SIZE>
 void launchCompactPrefixKernel(T* dOutputData, const T* dInputData, const unsigned int* dProcessorCounts,
                                const unsigned int dataSize) {
     constexpr auto warpPerBlock = BLOCK_SIZE >> 5;
@@ -222,7 +352,19 @@ void launchCompactPrefixKernel(T* dOutputData, const T* dInputData, const unsign
     compactPrefixKernel<T, Iter><<<gridSize, BLOCK_SIZE>>>(dOutputData, dInputData, dProcessorCounts, dataSize);
 }
 
-template<int Kp, int BLOCK_SIZE>
+/**
+ * @struct CompactHandler
+ * @brief Legacy stateful compaction handler; pre-allocates count and prefix-sum buffers.
+ *
+ * @details Allocates processorCounts and buffer once in setup(), then reuses
+ * them across compact() calls.  Not used by the current query pipeline
+ * (which calls launchCountKernel and launchPrefixSumKernel directly) but
+ * retained for compatibility with older code paths.
+ *
+ * @tparam Kp         Elements processed per warp.
+ * @tparam BLOCK_SIZE Threads per block.
+ */
+template <int Kp, int BLOCK_SIZE>
 struct CompactHandler {
 
     CompactHandler() : size(0), processorCounts(nullptr), buffer(nullptr) {}
@@ -244,7 +386,7 @@ struct CompactHandler {
         cudaMalloc(&processorCounts, processors * sizeof(unsigned int));
     }
 
-    template<typename T>
+    template <typename T>
     void compact(T* outputData, const T* inputData) {
         constexpr auto warpPerBlock = BLOCK_SIZE >> 5;
         const auto processors = (size + Kp - 1) / Kp;
@@ -275,4 +417,4 @@ struct CompactHandler {
     unsigned int* processorCounts;
     unsigned int* buffer;
 };
-#endif //CUDADB_COMPACT_CUH
+#endif // CUDADB_COMPACT_CUH

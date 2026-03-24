@@ -1,37 +1,41 @@
 #pragma once
+
 #include <vector>
 #include <cmath>
 #include <chrono>
 #include <random>
 #include <stdexcept>
-#include <iomanip> 
-#include <algorithm>   // std::sort, std::iota
+#include <iomanip>
+#include <algorithm>
 #include <numeric>
 #include <cassert>
 #include <fstream>
+#include <iostream>
+#include <sstream>
+
 namespace Comp {
 
-//  |val| < 1e-6
+/// @brief Return true if |val| < 1e-6.
 inline bool isZero(double val) {
-    static constexpr double EPSILON = 1e-6;
-    return std::fabs(val) < EPSILON;
+    static constexpr double kEps = 1e-6;
+    return std::fabs(val) < kEps;
 }
 
-// define epsilon by your own 
+/// @brief Return true if |val| < epsilon.
 inline bool isZeroWithEps(double val, double epsilon) {
     return std::fabs(val) < epsilon;
 }
 
-// vec comp
-inline bool isVectorEqual(const std::vector<double>& v1,
-                          const std::vector<double>& v2) {
-    if (v1.size() != v2.size()) return false;
-    for (size_t i = 0; i < v1.size(); ++i)
-        if (!isZero(v1[i] - v2[i])) return false;
+/// @brief Return true if two vectors are component-wise equal within kEps.
+inline bool isVectorEqual(const std::vector<double>& a,
+                          const std::vector<double>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (!isZero(a[i] - b[i])) return false;
     return true;
 }
 
-// mat comp
+/// @brief Return true if two matrices are component-wise equal within kEps.
 inline bool isMatrixEqual(const std::vector<std::vector<double>>& m1,
                           const std::vector<std::vector<double>>& m2) {
     if (m1.size() != m2.size()) return false;
@@ -39,7 +43,6 @@ inline bool isMatrixEqual(const std::vector<std::vector<double>>& m1,
     const size_t cols = m1[0].size();
     for (const auto& row : m2)
         if (row.size() != cols) return false;
-
     for (size_t i = 0; i < m1.size(); ++i)
         for (size_t j = 0; j < cols; ++j)
             if (!isZero(m1[i][j] - m2[i][j])) return false;
@@ -48,68 +51,85 @@ inline bool isMatrixEqual(const std::vector<std::vector<double>>& m1,
 
 } // namespace Comp
 
-
-
-
 namespace RandomSelector {
 
-// 按概率 p 抽取 raw 中的元素，返回新 vector
-inline std::vector<size_t> generate_with_probability_random_size_t_vec(double p, const std::vector<size_t>& raw)
+/**
+ * @brief Sample elements from @p raw with independent Bernoulli probability @p p.
+ * @param p   Inclusion probability in [0, 1].
+ * @param raw Source vector.
+ * @return    New vector containing the sampled elements.
+ */
+inline std::vector<size_t> sampleWithProbability(
+    double p, const std::vector<size_t>& raw)
 {
     if (p < 0.0 || p > 1.0)
-        throw std::invalid_argument("p must be in [0,1]");
+        throw std::invalid_argument("p must be in [0, 1]");
 
     std::vector<size_t> result;
     std::bernoulli_distribution dist(p);
-    std::mt19937 rng{std::random_device{}()};   // 只构造一次，性能更好
+    std::mt19937 rng{std::random_device{}()};
 
-    result.reserve(raw.size());                 // 提前 reserve 避免反复分配
+    result.reserve(raw.size());
     for (size_t elem : raw)
         if (dist(rng)) result.push_back(elem);
+    return result;
+}
 
-    return result;                              // 空 vector 自然 size()==0
+// Legacy shim
+inline std::vector<size_t>
+generate_with_probability_random_size_t_vec(double p,
+                                            const std::vector<size_t>& raw) {
+    return sampleWithProbability(p, raw);
 }
 
 } // namespace RandomSelector
 
 namespace Simulation {
 
-// print process：[====>      ] 40.0% (40/100)
-inline void showProgress(int current, int total)
-{
-    if (total <= 0) return;               // 防止除 0
-    const float progress = static_cast<float>(current) / total;
-    constexpr int barWidth = 50;
+/**
+ * @brief Print a progress bar to stdout.
+ *        Format: [====>      ] 40.0% (40/100)
+ */
+inline void showProgress(int current, int total) {
+    if (total <= 0) return;
+    const float  progress = static_cast<float>(current) / static_cast<float>(total);
+    constexpr int kWidth  = 50;
+    const int    pos      = static_cast<int>(kWidth * progress);
 
-    std::cout << '\r' << '[';             // 回行首
-    const int pos = static_cast<int>(barWidth * progress);
-
-    for (int i = 0; i < barWidth; ++i) {
-        if (i < pos)      std::cout << '=';
+    std::cout << '\r' << '[';
+    for (int i = 0; i < kWidth; ++i) {
+        if      (i < pos)  std::cout << '=';
         else if (i == pos) std::cout << '>';
-        else              std::cout << ' ';
+        else               std::cout << ' ';
     }
-
     std::cout << "] " << std::fixed << std::setprecision(1)
               << (progress * 100.0f) << "% "
-              << '(' << current << '/' << total << ')' << std::flush;
-
-    std::cout << std::endl;
+              << '(' << current << '/' << total << ')' << std::endl;
 }
 
 } // namespace Simulation
 
 namespace Sort {
 
-// 返回排序后的“下标数组”：labels[result[i]] 按 ascending/descending 有序
-inline std::vector<size_t> Sorted_Layer_With_Original_idxs(const std::vector<size_t>& labels, bool ascending = true)
+/**
+ * @brief Return an index permutation that sorts @p labels in ascending or
+ *        descending order.
+ *
+ *        After the call, labels[result[i]] is sorted.
+ *
+ * @param labels     Label vector to sort by.
+ * @param ascending  Sort direction (default: ascending).
+ * @return           Permutation array of the same length as labels.
+ */
+inline std::vector<size_t>
+Sorted_Layer_With_Original_idxs(const std::vector<size_t>& labels,
+                                 bool ascending = true)
 {
     assert(!labels.empty());
     std::vector<size_t> idx(labels.size());
-    std::iota(idx.begin(), idx.end(), 0);          // 0,1,2,...,n-1
+    std::iota(idx.begin(), idx.end(), 0);
     std::sort(idx.begin(), idx.end(),
-              [&labels, ascending](size_t i, size_t j)
-              {
+              [&labels, ascending](size_t i, size_t j) {
                   return ascending ? labels[i] < labels[j]
                                    : labels[i] > labels[j];
               });
@@ -120,127 +140,96 @@ inline std::vector<size_t> Sorted_Layer_With_Original_idxs(const std::vector<siz
 
 namespace Chrono {
 
-/*
- * 自适应打印 t1 -> t2 的间隔：
- *  >= 1 s   ->  1.234 s
- *  >= 1 ms  ->  12.34 ms
- *  otherwise->  123.4 µs
+/**
+ * @brief Print the elapsed time between t1 and t2 with adaptive units:
+ *         >= 1 s   -> "X.XXX s"
+ *         >= 1 ms  -> "X.XXX ms"
+ *         otherwise-> "X.XXX us"
  */
 template<class Clock = std::chrono::steady_clock>
-void printElapsed(const std::string& str,
+void printElapsed(const std::string& label,
                   const typename Clock::time_point& t1,
                   const typename Clock::time_point& t2)
 {
     using namespace std::chrono;
-    auto dur = t2 - t1;
+    const auto dur = t2 - t1;
 
-    std::cout << str << " : ";
-    if (dur >= duration<double>(1))                    // ≥ 1 s
+    std::cout << label << " : ";
+    if      (dur >= duration<double>(1))
         std::cout << std::fixed << std::setprecision(3)
                   << duration<double>(dur).count() << " s\n";
-    else if (dur >= duration<double, std::milli>(1))   // ≥ 1 ms
+    else if (dur >= duration<double, std::milli>(1))
         std::cout << std::fixed << std::setprecision(3)
                   << duration<double, std::milli>(dur).count() << " ms\n";
-    else                                               // < 1 ms
+    else
         std::cout << std::fixed << std::setprecision(3)
-                  << duration<double, std::micro>(dur).count() << " µs\n";
+                  << duration<double, std::micro>(dur).count() << " us\n";
 }
 
+/**
+ * @brief Print the average elapsed time over @p totalTimes repetitions.
+ */
 template<class Clock = std::chrono::steady_clock>
-void printAvgElapsed(const std::string& str,
-                  const typename Clock::time_point& t1,
-                  const typename Clock::time_point& t2,
-                  size_t total_times)
+void printAvgElapsed(const std::string& label,
+                     const typename Clock::time_point& t1,
+                     const typename Clock::time_point& t2,
+                     size_t totalTimes)
 {
     using namespace std::chrono;
-    if (total_times == 0) {
-        return;
-    }          // 防止除 0
-    auto dur = (t2 - t1) / total_times;    // 平均时长
+    if (totalTimes == 0) return;
+    const auto dur = (t2 - t1) / totalTimes;
 
-    std::cout << str << " : ";
-    if (dur >= duration<double>(1))                    // ≥ 1 s
+    std::cout << label << " : ";
+    if      (dur >= duration<double>(1))
         std::cout << std::fixed << std::setprecision(3)
                   << duration<double>(dur).count() << " s\n";
-    else if (dur >= duration<double, std::milli>(1))   // ≥ 1 ms
+    else if (dur >= duration<double, std::milli>(1))
         std::cout << std::fixed << std::setprecision(3)
                   << duration<double, std::milli>(dur).count() << " ms\n";
-    else                                               // < 1 ms
+    else
         std::cout << std::fixed << std::setprecision(3)
-                  << duration<double, std::micro>(dur).count() << " µs\n";
+                  << duration<double, std::micro>(dur).count() << " us\n";
 }
 
 } // namespace Chrono
 
-
-// namespace dist meric
 namespace dist {
 
-// euclidean distance
-// calc the euclidiean distance between vec a and vec b
+/**
+ * @brief Euclidean distance between two equal-length vectors.
+ * @throws std::invalid_argument if a.size() != b.size().
+ */
 inline double euclidean(const std::vector<double>& a,
                         const std::vector<double>& b)
 {
-    // 1. dim must be the same !!!
     if (a.size() != b.size())
-    {
-        assert(false);
-        throw std::invalid_argument("Size mismatch in euclidean().");
-    }
-
-    // 2. foreach dim
+        throw std::invalid_argument("euclidean: size mismatch");
     double sum = 0.0;
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        double diff = a[i] - b[i];
-        sum += diff * diff;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const double d = a[i] - b[i];
+        sum += d * d;
     }
     return std::sqrt(sum);
 }
 
-// the square of euclidiean distance
-inline double euclidean_squared(const std::vector<double>& a,
-                                const std::vector<double>& b)
+/// @brief Squared Euclidean distance (avoids the sqrt).
+inline double euclideanSquared(const std::vector<double>& a,
+                               const std::vector<double>& b)
 {
     if (a.size() != b.size())
-        throw std::invalid_argument("Size mismatch in euclidean_squared().");
-
+        throw std::invalid_argument("euclideanSquared: size mismatch");
     double sum = 0.0;
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        double diff = a[i] - b[i];
-        sum += diff * diff;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const double d = a[i] - b[i];
+        sum += d * d;
     }
-    // without sqrt
-    return sum;   
-
+    return sum;
 }
 
-}  // namespace dist
-
-
-namespace Serialization{
-inline void write_max_radius(std::string& base_dir,
-                             size_t idx,
-                             const double* max_radius,
-                             std::size_t Centroids_nums)
-{
-    // 1. handle base_dir, to prevent corner case.
-    if (!base_dir.empty() && base_dir.back() != '/') base_dir += '/';
-
-    // 2 construct file name
-    std::ostringstream oss;
-    oss << base_dir << "Mesh_" << idx;
-
-    /* 3. 打开文件并写入 */
-    std::ofstream fout(oss.str());
-    if (!fout.is_open())
-        throw std::runtime_error("Load_To_File: cannot create " + oss.str());
-
-    fout << std::fixed << std::setprecision(6);
-    
-    for (std::size_t i = 0; i < Centroids_nums; ++i) {
-        fout << i << " : " << max_radius[i] << '\n';
-    }
+// Legacy shims
+inline double euclidean_squared(const std::vector<double>& a,
+                                const std::vector<double>& b) {
+    return euclideanSquared(a, b);
 }
 
-
-} // end namespace Serialization
+} // namespace dist

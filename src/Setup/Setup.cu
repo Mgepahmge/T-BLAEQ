@@ -1,116 +1,97 @@
-//
-// Created by cuda01 on 2026/1/5.
-//
-
 #include "Setup.cuh"
 #include "src/func.hpp"
 
-size_t Compute_Layer_nums(size_t N) {
-    return 4;
+size_t Compute_Layer_nums(size_t /*N*/) { return 4; }
+
+size_t Compute_Centroid_nums(size_t dataNums, size_t ratio) {
+    if (ratio == 0 || dataNums / ratio == 0) {
+        return 1;
+    }
+    return dataNums / ratio;
 }
 
-size_t Compute_Centroid_nums(size_t data_nums, size_t ratio) {
-    if (data_nums / ratio == 0) return 1;
-    return data_nums / ratio;
-}
-
-SparseTensorCscFormat* Genenate_One_P_Tensor(size_t D, size_t P_row_len, size_t P_col_len, CUDAKmeans* KMeans_Ptr,
+SparseTensorCscFormat* Genenate_One_P_Tensor(size_t D, size_t pRowLen, size_t pColLen, CUDAKmeans* kmeans,
                                              size_t*& map) {
-    assert(P_row_len > 0);
-    assert(P_col_len > 0);
-    // 1. get original data( Coreast Mesh, Fine Mesh, Labels)
-    auto& Coreast_Original_Mesh = KMeans_Ptr->getCentroids();
-    auto& Fine_Original_Mesh = KMeans_Ptr->getdatas();
-    auto& labels = KMeans_Ptr->getLabels();
-    // 2. get P nnz_per_col array
-    std::vector<size_t> labels_mcv_list(P_col_len, 0);
-    std::for_each(labels.begin(), labels.end(),
-                  [&labels_mcv_list](int id) { ++labels_mcv_list[id]; });
+    assert(pRowLen > 0);
+    assert(pColLen > 0);
 
-    size_t max_nnz_per_col = 0;
-    max_nnz_per_col = *std::max_element(labels_mcv_list.begin(), labels_mcv_list.end());
-    std::cout << "max_nnz_per_col are " << max_nnz_per_col << std::endl;
-    assert(max_nnz_per_col > 0);
-    // xak note :: why + 10 ? To prevent the array boundaries problem
-    double* P_vals_batch = new double[D * (max_nnz_per_col + 10)]();
+    // Retrieve KMeans results
+    const auto& coarseMesh = kmeans->getCentroids();
+    const auto& fineMesh = kmeans->getdatas();
+    const auto& labels = kmeans->getLabels();
 
-    // 3. new P_Sparse_Tensor_Csc_Format
-    SparseTensorCscFormat* P_Sparse_Tensor_Csc_Format = new SparseTensorCscFormat(
-        D, P_row_len, P_col_len, labels_mcv_list);
+    // Count NNZ per column (number of fine-mesh points per centroid)
+    std::vector<size_t> nnzPerCol(pColLen, 0);
+    std::for_each(labels.begin(), labels.end(), [&nnzPerCol](int id) { ++nnzPerCol[id]; });
 
-    // 4. do sort and copy
-    std::vector<size_t> sort_indices_vec = Sort::Sorted_Layer_With_Original_idxs(labels);
-    map = new size_t[sort_indices_vec.size()];
-    std::copy(sort_indices_vec.begin(), sort_indices_vec.end(), map);
+    const size_t maxNnzPerCol = *std::max_element(nnzPerCol.begin(), nnzPerCol.end());
+    assert(maxNnzPerCol > 0);
+    std::cout << "max_nnz_per_col: " << maxNnzPerCol << "\n";
 
-    // 5. do-loop insert batchs
-    const size_t* P_col_res = P_Sparse_Tensor_Csc_Format->get_col_res();
-    for (size_t i = 0; i < P_col_len; i++) {
-        size_t begin_pos = P_col_res[i];
-        size_t end_pos = P_col_res[i + 1];
-        assert(begin_pos <= end_pos);
-        auto& centroid_val = Coreast_Original_Mesh[i];
-        size_t writeIdx = 0;
-        for (size_t j = begin_pos; j < end_pos; j++) {
-            size_t original_id = sort_indices_vec[j];
-            auto& original_val = Fine_Original_Mesh[original_id];
-            for (size_t k = 0; k < D; k++) {
-                if (Comp::isZero(centroid_val[k])) {
-                    std::cout << "There is num / 0 serious error" << std::endl;
+    // Temporary batch buffer (+10 to avoid boundary issues)
+    auto* batchBuf = new double[D * (maxNnzPerCol + 10)]();
+
+    // Allocate the CSC tensor
+    auto* pTensor = new SparseTensorCscFormat(D, pRowLen, pColLen, nnzPerCol);
+
+    // Build the sort-to-original map
+    std::vector<size_t> sortedIdx = Sort::Sorted_Layer_With_Original_idxs(labels);
+    map = new size_t[sortedIdx.size()];
+    std::copy(sortedIdx.begin(), sortedIdx.end(), map);
+
+    // Fill value batches: for each centroid column, write the ratio
+    // (fine[j] / coarse[i]) component-wise into the CSC value array.
+    const size_t* colRes = pTensor->get_col_res();
+    for (size_t col = 0; col < pColLen; ++col) {
+        const size_t beg = colRes[col];
+        const size_t end = colRes[col + 1];
+        const auto& cVal = coarseMesh[col];
+        size_t wIdx = 0;
+
+        for (size_t pos = beg; pos < end; ++pos) {
+            const size_t origId = sortedIdx[pos];
+            const auto& fVal = fineMesh[origId];
+            for (size_t d = 0; d < D; ++d) {
+                if (Comp::isZero(cVal[d])) {
+                    std::cout << "ERROR: division by zero in P-tensor build\n";
                     assert(false);
                 }
-                P_vals_batch[writeIdx * D + k] = original_val[k] / centroid_val[k];
+                batchBuf[wIdx * D + d] = fVal[d] / cVal[d];
             }
-            writeIdx++;
+            ++wIdx;
         }
-        P_Sparse_Tensor_Csc_Format->Insert_One_Batch(P_vals_batch, begin_pos, end_pos);
+        pTensor->Insert_One_Batch(batchBuf, beg, end);
     }
 
-    // 6. debug
-    // nothing !!!
-
-    // 7. ret
-    delete[] P_vals_batch;
-    return P_Sparse_Tensor_Csc_Format;
+    delete[] batchBuf;
+    return pTensor;
 }
 
+double* Compute_Max_Radius(size_t D, const size_t* centroidColRes, const size_t* sortToOriginalMap,
+                           CUDAKmeans* kmeans) {
+    const auto& coarseMesh = kmeans->getCentroids();
+    const auto& fineMesh = kmeans->getdatas();
+    const size_t nCentroids = coarseMesh.size();
 
-double* Compute_Max_Radius(size_t D, const size_t* centroid_col_res, const size_t* sort_to_original_reflections,
-                           CUDAKmeans* KMeans_Ptr) {
-    auto& Coreast_Original_Mesh = KMeans_Ptr->getCentroids();
-    auto& Fine_Original_Mesh = KMeans_Ptr->getdatas();
-    size_t Centroids_nums = Coreast_Original_Mesh.size();
-    double* max_radius = new double[Centroids_nums];
-    for (size_t i = 0; i < Centroids_nums; i++) {
-        size_t begin_pos = centroid_col_res[i];
-        size_t end_pos = centroid_col_res[i + 1];
-        auto& coreast_mesh_val = Coreast_Original_Mesh[i];
-        double max_distance = 0.0;
-        for (size_t sort_idx = begin_pos; sort_idx < end_pos; sort_idx++) {
-            size_t abs_idx = sort_to_original_reflections[sort_idx];
-            auto& fine_mesh_val = Fine_Original_Mesh[abs_idx];
-            max_distance = std::max(max_distance, dist::euclidean(coreast_mesh_val, fine_mesh_val));
+    auto* radius = new double[nCentroids];
+
+    for (size_t i = 0; i < nCentroids; ++i) {
+        const size_t beg = centroidColRes[i];
+        const size_t end = centroidColRes[i + 1];
+        const auto& centroid = coarseMesh[i];
+        double maxDist = 0.0;
+
+        for (size_t pos = beg; pos < end; ++pos) {
+            const size_t absIdx = sortToOriginalMap[pos];
+            maxDist = std::max(maxDist, dist::euclidean(centroid, fineMesh[absIdx]));
         }
-        // assert(!Comp::isZero(max_distance));
-        max_radius[i] = max_distance;
+        radius[i] = maxDist;
     }
-    return max_radius;
+
+    return radius;
 }
 
-
-
-void deleteGrid(GridAsSparseMatrix* grid) {
-    cudaPointerAttributes attr{};
-    CUDA_CHECK(cudaPointerGetAttributes(&attr, grid->get_ids_()));
-    freeMemoryDependAttr(grid->get_ids_(), attr);
-    CUDA_CHECK(cudaPointerGetAttributes(&attr, grid->get_vals_()));
-    freeMemoryDependAttr(grid->get_vals_(), attr);
-    grid->set_ids(nullptr);
-    grid->set_vals(nullptr);
-    delete grid;
-}
-
-std::string getQueryTypeString(const QueryType qType) {
+std::string getQueryTypeString(QueryType qType) {
     switch (qType) {
     case QueryType::RANGE:
         return "RANGE";

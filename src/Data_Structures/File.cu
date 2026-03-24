@@ -1,243 +1,248 @@
-//
-// Created by cuda01 on 2025/12/26.
-//
-
-#include "File.cuh"
 #include <fstream>
 #include <sstream>
-#include <string>
 #include <stdexcept>
+#include "File.cuh"
 
-Multidimensional_Arr loadFromFile(const std::string& filename) {
+PointCloud loadFromFile(const std::string& filename) {
     std::ifstream file(filename);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open file: " + filename);
+        throw std::runtime_error("loadFromFile: cannot open '" + filename + "'");
     }
 
     int length = 0, dim = 0;
     std::string line;
 
-    if (std::getline(file, line)) {
-        std::istringstream iss(line);
-        if (!(iss >> length >> dim)) {
-            throw std::runtime_error("File format error: invalid metadata format");
-        }
-
-        if (length <= 0 || dim <= 0) {
-            throw std::runtime_error("File format error: length and dimension must be positive");
-        }
-    } else {
-        throw std::runtime_error("File format error: empty file");
+    if (!std::getline(file, line)) {
+        throw std::runtime_error("loadFromFile: empty file '" + filename + "'");
     }
 
-    Multidimensional_Arr arr(length, dim);
+    {
+        std::istringstream iss(line);
+        if (!(iss >> length >> dim) || length <= 0 || dim <= 0) {
+            throw std::runtime_error("loadFromFile: invalid header in '" + filename + "'");
+        }
+    }
+
+    PointCloud cloud(length, dim);
 
     int row = 0;
     while (std::getline(file, line) && row < length) {
         std::istringstream iss(line);
-        double value;
+        double v;
         int col = 0;
-
-        while (iss >> value && col < dim) {
-            arr.data[row * dim + col] = value;
-            col++;
+        while (iss >> v && col < dim) {
+            cloud.data[static_cast<size_t>(row) * dim + col++] = v;
         }
 
         if (col != dim) {
-            throw std::runtime_error("File format error: dimension mismatch at row " +
-                                   std::to_string(row + 1));
+            throw std::runtime_error("loadFromFile: dimension mismatch at row " + std::to_string(row + 1));
         }
-        row++;
+        ++row;
     }
 
     if (row != length) {
-        throw std::runtime_error("File format error: row count mismatch");
+        throw std::runtime_error("loadFromFile: row count mismatch in '" + filename + "'");
     }
 
-    file.close();
-    return arr;
+    return cloud;
 }
 
-void saveToFile(const Multidimensional_Arr& arr, const std::string& filename) {
+void saveToFile(const PointCloud& cloud, const std::string& filename) {
     std::ofstream file(filename);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to create file: " + filename);
+        throw std::runtime_error("saveToFile: cannot create '" + filename + "'");
     }
 
-    file << arr.N << " " << arr.D << "\n";
-
-    for (int i = 0; i < arr.N; i++) {
-        for (int j = 0; j < arr.D; j++) {
-            file << arr.data[i * arr.D + j];
-            if (j < arr.D - 1) {
-                file << " ";
+    file << cloud.size << ' ' << cloud.dim << '\n';
+    for (int i = 0; i < cloud.size; ++i) {
+        for (int j = 0; j < cloud.dim; ++j) {
+            if (j) {
+                file << ' ';
             }
+            file << cloud.data[static_cast<size_t>(i) * cloud.dim + j];
         }
-        file << "\n";
+        file << '\n';
     }
-
-    file.close();
 }
 
-// 加载查询点文件
-Query loadQueryPointFromFile(const std::string& filename) {
+std::vector<double> Query::getQueryPoint(int index) const {
+    if (type != QueryType::POINT) {
+        throw std::runtime_error("getQueryPoint: query type is not POINT");
+    }
+    if (index < 0 || index >= length) {
+        throw std::out_of_range("getQueryPoint: index out of range");
+    }
+
+    std::vector<double> pt(static_cast<size_t>(dim));
+    const size_t off = static_cast<size_t>(index) * dim;
+    for (int j = 0; j < dim; ++j) {
+        pt[j] = data[off + j];
+    }
+    return pt;
+}
+
+std::pair<std::vector<double>, std::vector<double>> Query::getQueryRange(int index) const {
+    if (type != QueryType::RANGE) {
+        throw std::runtime_error("getQueryRange: query type is not RANGE");
+    }
+    if (index < 0 || index >= length) {
+        throw std::out_of_range("getQueryRange: index out of range");
+    }
+
+    std::vector<double> lo(static_cast<size_t>(dim));
+    std::vector<double> hi(static_cast<size_t>(dim));
+    const size_t off = static_cast<size_t>(index) * 2 * dim;
+    for (int j = 0; j < dim; ++j) {
+        lo[j] = data[off + j];
+        hi[j] = data[off + dim + j];
+    }
+    return {lo, hi};
+}
+
+void Query::setQueryPoint(int index, const std::vector<double>& point) {
+    if (type != QueryType::POINT) {
+        throw std::runtime_error("setQueryPoint: query type is not POINT");
+    }
+    if (index < 0 || index >= length) {
+        throw std::out_of_range("setQueryPoint: index out of range");
+    }
+    if (static_cast<int>(point.size()) != dim) {
+        throw std::invalid_argument("setQueryPoint: dimension mismatch");
+    }
+
+    const size_t off = static_cast<size_t>(index) * dim;
+    for (int j = 0; j < dim; ++j) {
+        data[off + j] = point[j];
+    }
+}
+
+void Query::setQueryRange(int index, const std::vector<double>& lower, const std::vector<double>& upper) {
+    if (type != QueryType::RANGE) {
+        throw std::runtime_error("setQueryRange: query type is not RANGE");
+    }
+    if (index < 0 || index >= length) {
+        throw std::out_of_range("setQueryRange: index out of range");
+    }
+    if (static_cast<int>(lower.size()) != dim || static_cast<int>(upper.size()) != dim) {
+        throw std::invalid_argument("setQueryRange: dimension mismatch");
+    }
+
+    const size_t off = static_cast<size_t>(index) * 2 * dim;
+    for (int j = 0; j < dim; ++j) {
+        data[off + j] = lower[j];
+        data[off + dim + j] = upper[j];
+    }
+}
+
+static Query loadQueryFromFile(const std::string& filename, QueryType expectedType) {
     std::ifstream file(filename);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open file: " + filename);
+        throw std::runtime_error("loadQueryFromFile: cannot open '" + filename + "'");
     }
 
     int length = 0, dim = 0;
     std::string line;
 
-    // 读取第一行：长度 维度
-    if (std::getline(file, line)) {
+    if (!std::getline(file, line)) {
+        throw std::runtime_error("loadQueryFromFile: empty file");
+    }
+
+    {
         std::istringstream iss(line);
-        if (!(iss >> length >> dim)) {
-            throw std::runtime_error("File format error: invalid metadata format");
+        if (!(iss >> length >> dim) || length <= 0 || dim <= 0) {
+            throw std::runtime_error("loadQueryFromFile: invalid header");
         }
-
-        if (length <= 0 || dim <= 0) {
-            throw std::runtime_error("File format error: length and dimension must be positive");
-        }
-    } else {
-        throw std::runtime_error("File format error: empty file");
     }
 
-    Query query(length, dim, QueryType::POINT);
+    Query q(length, dim, expectedType);
 
-    int row = 0;
-    while (std::getline(file, line) && row < length) {
-        std::istringstream iss(line);
-        double value;
-        int col = 0;
+    if (expectedType == QueryType::RANGE) {
+        // File format: each row contains 2*dim values (lower bounds then upper bounds).
+        // This matches the original format: data[i * 2*dim + 0..dim-1] = lower,
+        //                                   data[i * 2*dim + dim..2*dim-1] = upper.
+        const int expectedCols = 2 * dim;
+        int rowRead = 0;
+        while (std::getline(file, line) && rowRead < length) {
+            std::istringstream iss(line);
+            double v;
+            int col = 0;
+            while (iss >> v && col < expectedCols) {
+                q.data[static_cast<size_t>(rowRead) * expectedCols + col++] = v;
+            }
 
-        while (iss >> value && col < dim) {
-            query.data[row * dim + col] = value;
-            col++;
+            if (col != expectedCols) {
+                throw std::runtime_error("loadQueryFromFile: expected " + std::to_string(expectedCols) +
+                                         " values but got " + std::to_string(col) + " at row " +
+                                         std::to_string(rowRead + 1));
+            }
+            ++rowRead;
         }
-
-        if (col != dim) {
-            throw std::runtime_error("File format error: dimension mismatch at row " +
-                                   std::to_string(row + 1));
+        if (rowRead != length) {
+            throw std::runtime_error("loadQueryFromFile: row count mismatch");
         }
-        row++;
+    }
+    else {
+        // POINT query: each row contains dim values.
+        int rowRead = 0;
+        while (std::getline(file, line) && rowRead < length) {
+            std::istringstream iss(line);
+            double v;
+            int col = 0;
+            while (iss >> v && col < dim) {
+                q.data[static_cast<size_t>(rowRead) * dim + col++] = v;
+            }
+
+            if (col != dim) {
+                throw std::runtime_error("loadQueryFromFile: dimension mismatch at row " + std::to_string(rowRead + 1));
+            }
+            ++rowRead;
+        }
+        if (rowRead != length) {
+            throw std::runtime_error("loadQueryFromFile: row count mismatch");
+        }
     }
 
-    if (row != length) {
-        throw std::runtime_error("File format error: row count mismatch");
-    }
-
-    file.close();
-    return query;
+    return q;
 }
 
-// 保存查询点到文件
-void saveQueryPointToFile(const Query& query, const std::string& filename) {
-    if (query.type != QueryType::POINT) {
-        throw std::runtime_error("Can only save point queries with this function");
-    }
+Query loadQueryPointFromFile(const std::string& filename) { return loadQueryFromFile(filename, QueryType::POINT); }
 
+Query loadQueryRangeFromFile(const std::string& filename) { return loadQueryFromFile(filename, QueryType::RANGE); }
+
+static void saveQueryToFile(const Query& q, const std::string& filename) {
     std::ofstream file(filename);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to create file: " + filename);
+        throw std::runtime_error("saveQueryToFile: cannot create '" + filename + "'");
     }
 
-    // 第一行：长度 维度
-    file << query.length << " " << query.dim << "\n";
+    file << q.length << ' ' << q.dim << '\n';
 
-    // 数据部分
-    for (int i = 0; i < query.length; i++) {
-        for (int j = 0; j < query.dim; j++) {
-            file << query.data[i * query.dim + j];
-            if (j < query.dim - 1) {
-                file << " ";
+    if (q.type == QueryType::RANGE) {
+        // Each row: 2*dim values (lower bounds then upper bounds)
+        const int expectedCols = 2 * q.dim;
+        for (int i = 0; i < q.length; ++i) {
+            for (int j = 0; j < expectedCols; ++j) {
+                if (j) {
+                    file << ' ';
+                }
+                file << q.data[static_cast<size_t>(i) * expectedCols + j];
             }
+            file << '\n';
         }
-        file << "\n";
     }
-
-    file.close();
-}
-
-// 加载查询范围文件
-Query loadQueryRangeFromFile(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        throw std::runtime_error("Failed to open file: " + filename);
-    }
-
-    int length = 0, dim = 0;
-    std::string line;
-
-    // 读取第一行：长度 维度
-    if (std::getline(file, line)) {
-        std::istringstream iss(line);
-        if (!(iss >> length >> dim)) {
-            throw std::runtime_error("File format error: invalid metadata format");
-        }
-
-        if (length <= 0 || dim <= 0) {
-            throw std::runtime_error("File format error: length and dimension must be positive");
-        }
-    } else {
-        throw std::runtime_error("File format error: empty file");
-    }
-
-    Query query(length, dim, QueryType::RANGE);
-
-    int row = 0;
-    while (std::getline(file, line) && row < length) {
-        std::istringstream iss(line);
-        double value;
-        int col = 0;
-        int expectedCols = 2 * dim;  // 每行应有 2×维度 个数据
-
-        while (iss >> value && col < expectedCols) {
-            query.data[row * expectedCols + col] = value;
-            col++;
-        }
-
-        if (col != expectedCols) {
-            throw std::runtime_error("File format error: expected " +
-                                   std::to_string(expectedCols) +
-                                   " values but got " + std::to_string(col) +
-                                   " at row " + std::to_string(row + 1));
-        }
-        row++;
-    }
-
-    if (row != length) {
-        throw std::runtime_error("File format error: row count mismatch");
-    }
-
-    file.close();
-    return query;
-}
-
-// 保存查询范围到文件
-void saveQueryRangeToFile(const Query& query, const std::string& filename) {
-    if (query.type != QueryType::RANGE) {
-        throw std::runtime_error("Can only save range queries with this function");
-    }
-
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        throw std::runtime_error("Failed to create file: " + filename);
-    }
-
-    // 第一行：长度 维度
-    file << query.length << " " << query.dim << "\n";
-
-    // 数据部分
-    for (int i = 0; i < query.length; i++) {
-        for (int j = 0; j < 2 * query.dim; j++) {
-            file << query.data[i * 2 * query.dim + j];
-            if (j < 2 * query.dim - 1) {
-                file << " ";
+    else {
+        for (int i = 0; i < q.length; ++i) {
+            for (int j = 0; j < q.dim; ++j) {
+                if (j) {
+                    file << ' ';
+                }
+                file << q.data[static_cast<size_t>(i) * q.dim + j];
             }
+            file << '\n';
         }
-        file << "\n";
     }
-
-    file.close();
 }
+
+void saveQueryPointToFile(const Query& q, const std::string& filename) { saveQueryToFile(q, filename); }
+
+void saveQueryRangeToFile(const Query& q, const std::string& filename) { saveQueryToFile(q, filename); }

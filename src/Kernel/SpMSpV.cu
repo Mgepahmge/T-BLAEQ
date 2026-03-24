@@ -1,10 +1,12 @@
 //
 // Created by Mgepahmge on 2025/12/19.
 //
+#include <algorithm>
+#include <unordered_map>
+#include <vector>
 #include "SpMSpV.cuh"
 #include "src/Query/check.cuh"
 #include "src/utils/NVTXProfiler.cuh"
-
 
 
 /**
@@ -15,341 +17,81 @@
  *
  * @return GridAsSparseMatrix The resulting grid after multiplication.(device)
  */
-GridAsSparseMatrix* SpTSpMMultiplication(SparseTensorCscFormat* P, GridAsSparseMatrix* grid) {
-    NvtxProfiler profiler("SpTSpMMultiplication", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Orange);
-    const auto numDims = grid->get_dimensions();
-    const auto P_row_nums = P->get_row_nums();
-    const auto P_col_nums = P->get_col_nums();
-    const auto grid_size = grid->get_nnz_nums();
-
-    size_t* h_matrixColPtr = nullptr;
-    size_t* h_matrixRowInd = nullptr;
-    double* h_matrixData = nullptr;
-    auto* h_vectorIndex = new size_t[grid_size];
-    auto* h_vectorData = new double[grid_size * numDims];
-    auto* d_vectorIndex = const_cast<size_t*>(grid->get_ids_());
-    auto* d_vectorData = const_cast<double*>(grid->get_vals_());
-    CUDA_CHECK(cudaMemcpy(h_vectorIndex, grid->get_ids_(), grid_size * sizeof(size_t), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_vectorData, grid->get_vals_(), grid_size * numDims * sizeof(double), cudaMemcpyDeviceToHost));
-
-    cudaPointerAttributes P_attrib{};
-    CUDA_CHECK(cudaPointerGetAttributes(&P_attrib, P->get_vals()));
-    if (P_attrib.type == cudaMemoryTypeDevice) {
-        h_matrixColPtr = new size_t[P_col_nums + 1];
-        CUDA_CHECK(cudaMemcpy(h_matrixColPtr, P->get_col_res(), (P_col_nums + 1) * sizeof(size_t), cudaMemcpyDeviceToHost));
-        const auto nnz_size = h_matrixColPtr[P_col_nums];
-        h_matrixRowInd = new size_t[nnz_size];
-        h_matrixData = new double[nnz_size * numDims];
-        CUDA_CHECK(cudaMemcpy(h_matrixRowInd, P->get_row_ids(), nnz_size * sizeof(size_t), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_matrixData, P->get_vals(), nnz_size * numDims * sizeof(double), cudaMemcpyDeviceToHost));
-    } else
-    {
-        h_matrixColPtr = const_cast<size_t*>(P->get_col_res());
-        h_matrixRowInd = const_cast<size_t*>(P->get_row_ids());
-        h_matrixData = const_cast<double*>(P->get_vals());
-    }
-
-    unsigned int numProcessedNonZero = 0;
-    // Step 1
-    // 计算稀疏矩阵中待处理的非零元数量
-    NvtxProfiler innerProfiler1("计算待处理非零元数量", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Rose);
-    for (auto i = 0; i < grid_size; ++i) {
-        const auto col = h_vectorIndex[i];
-        numProcessedNonZero += (h_matrixColPtr[col + 1] - h_matrixColPtr[col]);
-    }
-    innerProfiler1.release();
-
-    // Step 2
-    // 分配中间数据存储空间
-    NvtxProfiler innerProfiler2("分配中间数据存储空间", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::LimeGreen);
-    auto* h_processedColInd = new size_t[numProcessedNonZero];
-    auto* h_processedValues = new double[numProcessedNonZero * numDims];
-    auto* h_processedRowInd = new size_t[numProcessedNonZero];
-    size_t* d_processedColInd = nullptr;
-    double* d_processedValues = nullptr;
-    size_t* d_processedRowInd = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_processedColInd, numProcessedNonZero * sizeof(size_t)));
-    CUDA_CHECK(cudaMalloc(&d_processedValues, numProcessedNonZero * numDims * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_processedRowInd, numProcessedNonZero * sizeof(size_t)));
-    innerProfiler2.release();
-
-    // Step 3
-    // 提取有效数据
-    NvtxProfiler innerProfiler3("提取有效数据", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Magenta);
-    unsigned int writeIdx = 0;
-    for (auto i = 0; i < grid_size; ++i) {
-        auto col = h_vectorIndex[i];
-        auto colStart = h_matrixColPtr[col];
-        auto colEnd = h_matrixColPtr[col + 1];
-
-        for (auto j = colStart; j < colEnd; ++j) {
-            h_processedColInd[writeIdx] = i;
-            h_processedRowInd[writeIdx] = h_matrixRowInd[j];
-            // 复制对应维度的值
-            for (auto d = 0; d < numDims; ++d) {
-                h_processedValues[writeIdx * numDims + d] =
-                    h_matrixData[j * numDims + d];
-            }
-            writeIdx++;
-        }
-    }
-    innerProfiler3.release();
-
-    // 将处理后的数据拷贝到设备端
-    CUDA_CHECK(cudaMemcpy(d_processedColInd, h_processedColInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_processedRowInd, h_processedRowInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_processedValues, h_processedValues, numProcessedNonZero * numDims * sizeof(double), cudaMemcpyHostToDevice));
-
-    size_t* yIndex;
-    double* yValue;
-    const auto totalNumNoneZero = numProcessedNonZero * numDims;
-    CUDA_CHECK(cudaMalloc(&yValue, totalNumNoneZero * sizeof(double)));
-    dim3 blockSize(512);
-    dim3 gridSize((totalNumNoneZero + UNROLL_FACTOR * blockSize.x - 1) / (UNROLL_FACTOR * blockSize.x));
-    SpMSpVKernelAOS<<<gridSize, blockSize>>>(yValue, d_processedColInd, d_processedValues, d_vectorData,
-                                                        numDims, totalNumNoneZero);
-    yIndex = d_processedRowInd;
-
-    // Step 4
-    // 在kernel运行期间并发的清理资源
-
-    if (P_attrib.type == cudaMemoryTypeDevice) {
-        delete[] h_matrixColPtr;
-        delete[] h_matrixRowInd;
-        delete[] h_matrixData;
-    }
-    delete[] h_vectorIndex;
-    delete[] h_vectorData;
-    delete[] h_processedColInd;
-    delete[] h_processedValues;
-    delete[] h_processedRowInd;
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaFree(d_processedColInd));
-    CUDA_CHECK(cudaFree(d_processedValues));
-
-    return new GridAsSparseMatrix{P_row_nums, numDims, numProcessedNonZero, yIndex, yValue};
-}
-
-/**
- * @brief V2版本：优化版本，避免CPU端大量数据复制
- *
- * 主要改进：
- * 1. 不再复制矩阵values数据到新数组
- * 2. 存储原始矩阵中的位置索引
- * 3. 在kernel中直接访问原始矩阵数据
- */
-GridAsSparseMatrix* SpTSpMMultiplication_v2(SparseTensorCscFormat* P, GridAsSparseMatrix* grid) {
-    NvtxProfiler profiler("SpTSpMMultiplication_v2", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Orange);
-    const auto numDims = grid->get_dimensions();
-    const auto P_row_nums = P->get_row_nums();
-    const auto P_col_nums = P->get_col_nums();
-    const auto grid_size = grid->get_nnz_nums();
-
-    size_t* h_matrixColPtr = nullptr;
-    size_t* h_matrixRowInd = nullptr;
-    double* d_matrixData = nullptr;
-    auto* h_vectorIndex = new size_t[grid_size];
-    auto* d_vectorData = const_cast<double*>(grid->get_vals_());
-    CUDA_CHECK(cudaMemcpy(h_vectorIndex, grid->get_ids_(), grid_size * sizeof(size_t), cudaMemcpyDeviceToHost));
-
-    cudaPointerAttributes P_attrib{};
-    CUDA_CHECK(cudaPointerGetAttributes(&P_attrib, P->get_vals()));
-
-    if (P_attrib.type == cudaMemoryTypeDevice) {
-        h_matrixColPtr = new size_t[P_col_nums + 1];
-        CUDA_CHECK(cudaMemcpy(h_matrixColPtr, P->get_col_res(), (P_col_nums + 1) * sizeof(size_t), cudaMemcpyDeviceToHost));
-        const auto nnz_size = h_matrixColPtr[P_col_nums];
-        h_matrixRowInd = new size_t[nnz_size];
-        CUDA_CHECK(cudaMemcpy(h_matrixRowInd, P->get_row_ids(), nnz_size * sizeof(size_t), cudaMemcpyDeviceToHost));
-
-        // 直接使用设备端的原始数据指针
-        d_matrixData = const_cast<double*>(P->get_vals());
-    } else {
-        h_matrixColPtr = const_cast<size_t*>(P->get_col_res());
-        h_matrixRowInd = const_cast<size_t*>(P->get_row_ids());
-
-        // 主机端数据需要拷贝到设备端
-        const auto nnz_size = h_matrixColPtr[P_col_nums];
-        CUDA_CHECK(cudaMalloc(&d_matrixData, nnz_size * numDims * sizeof(double)));
-        CUDA_CHECK(cudaMemcpy(d_matrixData, P->get_vals(), nnz_size * numDims * sizeof(double), cudaMemcpyHostToDevice));
-    }
-
-    unsigned int numProcessedNonZero = 0;
-    // Step 1: 计算待处理的非零元数量
-    NvtxProfiler innerProfiler1("计算待处理非零元数量", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Rose);
-    for (auto i = 0; i < grid_size; ++i) {
-        const auto col = h_vectorIndex[i];
-        numProcessedNonZero += (h_matrixColPtr[col + 1] - h_matrixColPtr[col]);
-    }
-    innerProfiler1.release();
-
-    // Step 2: 分配索引数据存储空间
-    NvtxProfiler innerProfiler2("分配索引数据存储空间", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::LimeGreen);
-    auto* h_processedColInd = new size_t[numProcessedNonZero];
-    auto* h_processedRowInd = new size_t[numProcessedNonZero];
-    auto* h_processedMatrixPos = new size_t[numProcessedNonZero]; // 存储原始矩阵位置
-    size_t* d_processedColInd = nullptr;
-    size_t* d_processedRowInd = nullptr;
-    size_t* d_processedMatrixPos = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_processedColInd, numProcessedNonZero * sizeof(size_t)));
-    CUDA_CHECK(cudaMalloc(&d_processedRowInd, numProcessedNonZero * sizeof(size_t)));
-    CUDA_CHECK(cudaMalloc(&d_processedMatrixPos, numProcessedNonZero * sizeof(size_t)));
-    innerProfiler2.release();
-
-    // Step 3: 提取索引数据（不复制values）
-    NvtxProfiler innerProfiler3("提取索引数据", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Magenta);
-    unsigned int writeIdx = 0;
-    for (auto i = 0; i < grid_size; ++i) {
-        auto col = h_vectorIndex[i];
-        auto colStart = h_matrixColPtr[col];
-        auto colEnd = h_matrixColPtr[col + 1];
-
-        for (auto j = colStart; j < colEnd; ++j) {
-            h_processedColInd[writeIdx] = i;
-            h_processedRowInd[writeIdx] = h_matrixRowInd[j];
-            h_processedMatrixPos[writeIdx] = j; // 记录原始矩阵中的位置
-            writeIdx++;
-        }
-    }
-    innerProfiler3.release();
-
-    // 将索引数据拷贝到设备端
-    CUDA_CHECK(cudaMemcpy(d_processedColInd, h_processedColInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_processedRowInd, h_processedRowInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_processedMatrixPos, h_processedMatrixPos, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
-
-    size_t* yIndex;
-    double* yValue;
-    const auto totalNumNoneZero = numProcessedNonZero * numDims;
-    CUDA_CHECK(cudaMalloc(&yValue, totalNumNoneZero * sizeof(double)));
-
-    dim3 blockSize(512);
-    dim3 gridSize_kernel((totalNumNoneZero + UNROLL_FACTOR * blockSize.x - 1) / (UNROLL_FACTOR * blockSize.x));
-
-    // 调用v2 kernel
-    SpMSpVKernelAOS_v2<<<gridSize_kernel, blockSize>>>(yValue, d_processedColInd, d_processedMatrixPos,
-                                                        d_matrixData, d_vectorData,
-                                                        numDims, totalNumNoneZero);
-    yIndex = d_processedRowInd;
-
-    // Step 4: 清理资源
-    if (P_attrib.type == cudaMemoryTypeDevice) {
-        delete[] h_matrixColPtr;
-        delete[] h_matrixRowInd;
-    } else {
-        CUDA_CHECK(cudaFree(d_matrixData));
-    }
-    delete[] h_vectorIndex;
-    delete[] h_processedColInd;
-    delete[] h_processedRowInd;
-    delete[] h_processedMatrixPos;
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaFree(d_processedColInd));
-    CUDA_CHECK(cudaFree(d_processedMatrixPos));
-
-    return new GridAsSparseMatrix{P_row_nums, numDims, numProcessedNonZero, yIndex, yValue};
-}
-
-/**
- * @brief V3版本：预加载数据到GPU
- *
- * 主要改进：
- * 1. 预先将P举证的values加载到GPU，避免大量内存拷贝
- */
 GridAsSparseMatrix* SpTSpMMultiplication_v3(SparseTensorCscFormat* P, GridAsSparseMatrix* grid, double* d_P_values) {
     NvtxProfiler profiler("SpTSpMMultiplication_v3", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Orange);
+
     const auto numDims = grid->get_dimensions();
     const auto P_row_nums = P->get_row_nums();
-    const auto P_col_nums = P->get_col_nums();
     const auto grid_size = grid->get_nnz_nums();
 
-    size_t* h_matrixColPtr = nullptr;
-    size_t* h_matrixRowInd = nullptr;
-    double* d_matrixData = d_P_values;
+    // P struct metadata is always on host -- use directly, no download needed.
+    const size_t* h_matrixColPtr = P->get_col_res(); // [HOST]
+    const size_t* h_matrixRowInd = P->get_row_ids(); // [HOST]
+    double* d_matrixData = d_P_values; // [DEVICE] -- pre-uploaded
+
+    // Download grid index from device (needed for CPU-side index scatter).
     auto* h_vectorIndex = new size_t[grid_size];
-    auto* d_vectorData = const_cast<double*>(grid->get_vals_());
     CUDA_CHECK(cudaMemcpy(h_vectorIndex, grid->get_ids_(), grid_size * sizeof(size_t), cudaMemcpyDeviceToHost));
+    auto* d_vectorData = const_cast<double*>(grid->get_vals_()); // [DEVICE]
 
-    cudaPointerAttributes P_attrib{};
-    CUDA_CHECK(cudaPointerGetAttributes(&P_attrib, P->get_vals()));
-
-    if (P_attrib.type == cudaMemoryTypeDevice) {
-        h_matrixColPtr = new size_t[P_col_nums + 1];
-        CUDA_CHECK(cudaMemcpy(h_matrixColPtr, P->get_col_res(), (P_col_nums + 1) * sizeof(size_t), cudaMemcpyDeviceToHost));
-        const auto nnz_size = h_matrixColPtr[P_col_nums];
-        h_matrixRowInd = new size_t[nnz_size];
-        CUDA_CHECK(cudaMemcpy(h_matrixRowInd, P->get_row_ids(), nnz_size * sizeof(size_t), cudaMemcpyDeviceToHost));
-    } else {
-        h_matrixColPtr = const_cast<size_t*>(P->get_col_res());
-        h_matrixRowInd = const_cast<size_t*>(P->get_row_ids());
-    }
-
+    // Step 1: count output non-zeros
+    NvtxProfiler p1("sptrsm_count", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Rose);
     unsigned int numProcessedNonZero = 0;
-    // Step 1: 计算待处理的非零元数量
-    NvtxProfiler innerProfiler1("计算待处理非零元数量", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Rose);
-    for (auto i = 0; i < grid_size; ++i) {
+    for (size_t i = 0; i < grid_size; ++i) {
         const auto col = h_vectorIndex[i];
-        numProcessedNonZero += (h_matrixColPtr[col + 1] - h_matrixColPtr[col]);
+        numProcessedNonZero += static_cast<unsigned int>(h_matrixColPtr[col + 1] - h_matrixColPtr[col]);
     }
-    innerProfiler1.release();
+    p1.release();
 
-    // Step 2: 分配索引数据存储空间
-    NvtxProfiler innerProfiler2("分配索引数据存储空间", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::LimeGreen);
+    // Step 2: allocate index arrays
+    NvtxProfiler p2("sptrsm_alloc", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::LimeGreen);
     auto* h_processedColInd = new size_t[numProcessedNonZero];
     auto* h_processedRowInd = new size_t[numProcessedNonZero];
-    auto* h_processedMatrixPos = new size_t[numProcessedNonZero]; // 存储原始矩阵位置
+    auto* h_processedMatrixPos = new size_t[numProcessedNonZero];
     size_t* d_processedColInd = nullptr;
     size_t* d_processedRowInd = nullptr;
     size_t* d_processedMatrixPos = nullptr;
     CUDA_CHECK(cudaMalloc(&d_processedColInd, numProcessedNonZero * sizeof(size_t)));
     CUDA_CHECK(cudaMalloc(&d_processedRowInd, numProcessedNonZero * sizeof(size_t)));
     CUDA_CHECK(cudaMalloc(&d_processedMatrixPos, numProcessedNonZero * sizeof(size_t)));
-    innerProfiler2.release();
+    p2.release();
 
-    // Step 3: 提取索引数据（不复制values）
-    NvtxProfiler innerProfiler3("提取索引数据", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Magenta);
+    // Step 3: scatter indices on host
+    NvtxProfiler p3("sptrsm_scatter", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Magenta);
     unsigned int writeIdx = 0;
-    for (auto i = 0; i < grid_size; ++i) {
-        auto col = h_vectorIndex[i];
-        auto colStart = h_matrixColPtr[col];
-        auto colEnd = h_matrixColPtr[col + 1];
-
+    for (size_t i = 0; i < grid_size; ++i) {
+        const auto col = h_vectorIndex[i];
+        const auto colStart = h_matrixColPtr[col];
+        const auto colEnd = h_matrixColPtr[col + 1];
         for (auto j = colStart; j < colEnd; ++j) {
             h_processedColInd[writeIdx] = i;
             h_processedRowInd[writeIdx] = h_matrixRowInd[j];
-            h_processedMatrixPos[writeIdx] = j; // 记录原始矩阵中的位置
-            writeIdx++;
+            h_processedMatrixPos[writeIdx] = j;
+            ++writeIdx;
         }
     }
-    innerProfiler3.release();
+    p3.release();
 
-    // 将索引数据拷贝到设备端
-    CUDA_CHECK(cudaMemcpy(d_processedColInd, h_processedColInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_processedRowInd, h_processedRowInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_processedMatrixPos, h_processedMatrixPos, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
+    // Upload index arrays to device
+    CUDA_CHECK(
+        cudaMemcpy(d_processedColInd, h_processedColInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(
+        cudaMemcpy(d_processedRowInd, h_processedRowInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_processedMatrixPos, h_processedMatrixPos, numProcessedNonZero * sizeof(size_t),
+                          cudaMemcpyHostToDevice));
 
-    size_t* yIndex;
-    double* yValue;
-    const auto totalNumNoneZero = numProcessedNonZero * numDims;
+    // Step 4: launch kernel
+    const auto totalNumNoneZero = static_cast<unsigned int>(numProcessedNonZero) * numDims;
+    double* yValue = nullptr;
     CUDA_CHECK(cudaMalloc(&yValue, totalNumNoneZero * sizeof(double)));
 
-    dim3 blockSize(512);
-    dim3 gridSize_kernel((totalNumNoneZero + UNROLL_FACTOR * blockSize.x - 1) / (UNROLL_FACTOR * blockSize.x));
+    const dim3 block(512);
+    const dim3 grid_dim((totalNumNoneZero + UNROLL_FACTOR * 512 - 1) / (UNROLL_FACTOR * 512));
+    SpMSpVKernelAOS_v2<<<grid_dim, block>>>(yValue, d_processedColInd, d_processedMatrixPos, d_matrixData, d_vectorData,
+                                            numDims, totalNumNoneZero);
+    size_t* yIndex = d_processedRowInd;
 
-    // 调用v2 kernel
-    SpMSpVKernelAOS_v2<<<gridSize_kernel, blockSize>>>(yValue, d_processedColInd, d_processedMatrixPos,
-                                                        d_matrixData, d_vectorData,
-                                                        numDims, totalNumNoneZero);
-    yIndex = d_processedRowInd;
-
-    // Step 4: 清理资源
-    if (P_attrib.type == cudaMemoryTypeDevice) {
-        delete[] h_matrixColPtr;
-        delete[] h_matrixRowInd;
-    } else {
-    }
+    // Step 5: cleanup host and temporary device buffers
     delete[] h_vectorIndex;
     delete[] h_processedColInd;
     delete[] h_processedRowInd;
@@ -360,4 +102,153 @@ GridAsSparseMatrix* SpTSpMMultiplication_v3(SparseTensorCscFormat* P, GridAsSpar
     CUDA_CHECK(cudaFree(d_processedMatrixPos));
 
     return new GridAsSparseMatrix{P_row_nums, numDims, numProcessedNonZero, yIndex, yValue};
+}
+
+GridAsSparseMatrix* SpTSpMMultiplication_v3_L2(SparseTensorCscFormat* P, GridAsSparseMatrix* grid) {
+    NvtxProfiler profiler("SpTSpMMultiplication_v3_L2", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Orange);
+
+    const auto numDims = grid->get_dimensions();
+    const auto P_row_nums = P->get_row_nums();
+    const auto grid_size = grid->get_nnz_nums();
+    const size_t* h_colPtr = P->get_col_res(); // [HOST]
+    const size_t* h_rowInd = P->get_row_ids(); // [HOST]
+    const double* h_pVals = P->get_vals(); // [HOST]
+
+    // Step 1: download pruned centroid ids from device
+    auto* h_vectorIndex = new size_t[grid_size];
+    CUDA_CHECK(cudaMemcpy(h_vectorIndex, grid->get_ids_(), grid_size * sizeof(size_t), cudaMemcpyDeviceToHost));
+
+    // Step 2: count output non-zeros
+    unsigned int numProcessedNonZero = 0;
+    for (size_t i = 0; i < grid_size; ++i) {
+        const auto col = h_vectorIndex[i];
+        numProcessedNonZero += static_cast<unsigned int>(h_colPtr[col + 1] - h_colPtr[col]);
+    }
+
+    // Step 3: build compact host arrays
+    //   hPValsCompact: only the needed column vals (numProcessedNonZero * D)
+    //   hColInd: local centroid index per nnz
+    //   hRowInd: output fine-point id per nnz
+    //   hMatPos: local nnz index (= writeIdx, for dPValsCompact access)
+    auto* hPValsCompact = new double[numProcessedNonZero * numDims];
+    auto* hColInd = new size_t[numProcessedNonZero];
+    auto* hRowInd = new size_t[numProcessedNonZero];
+    auto* hMatPos = new size_t[numProcessedNonZero];
+
+    unsigned int writeIdx = 0;
+    for (size_t i = 0; i < grid_size; ++i) {
+        const auto col = h_vectorIndex[i];
+        const auto colStart = h_colPtr[col];
+        const auto colEnd = h_colPtr[col + 1];
+        const auto colNnz = colEnd - colStart;
+
+        // Collect P vals for this column (contiguous block -- one memcpy)
+        std::memcpy(hPValsCompact + writeIdx * numDims, h_pVals + colStart * numDims,
+                    colNnz * numDims * sizeof(double));
+
+        for (auto j = colStart; j < colEnd; ++j) {
+            hColInd[writeIdx] = i;
+            hRowInd[writeIdx] = h_rowInd[j];
+            hMatPos[writeIdx] = writeIdx; // local offset into dPValsCompact
+            ++writeIdx;
+        }
+    }
+
+    delete[] h_vectorIndex;
+
+    // Step 4: upload compact P vals + index arrays to device
+    double* dPValsCompact = nullptr;
+    size_t* dColInd = nullptr;
+    size_t* dRowInd = nullptr;
+    size_t* dMatPos = nullptr;
+    CUDA_CHECK(cudaMalloc(&dPValsCompact, (size_t)numProcessedNonZero * numDims * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&dColInd, numProcessedNonZero * sizeof(size_t)));
+    CUDA_CHECK(cudaMalloc(&dRowInd, numProcessedNonZero * sizeof(size_t)));
+    CUDA_CHECK(cudaMalloc(&dMatPos, numProcessedNonZero * sizeof(size_t)));
+
+    CUDA_CHECK(cudaMemcpy(dPValsCompact, hPValsCompact, (size_t)numProcessedNonZero * numDims * sizeof(double),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dColInd, hColInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dRowInd, hRowInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dMatPos, hMatPos, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
+
+    delete[] hPValsCompact;
+    delete[] hColInd;
+    delete[] hRowInd;
+    delete[] hMatPos;
+
+    // Step 5: launch kernel
+    double* dVectorData = const_cast<double*>(grid->get_vals_()); // [DEVICE]
+    const auto totalNumNoneZero = static_cast<unsigned int>(numProcessedNonZero) * numDims;
+    double* yValue = nullptr;
+    CUDA_CHECK(cudaMalloc(&yValue, totalNumNoneZero * sizeof(double)));
+
+    const dim3 block(512);
+    const dim3 grid_dim((totalNumNoneZero + UNROLL_FACTOR * 512 - 1) / (UNROLL_FACTOR * 512));
+    SpMSpVKernelAOS_v2<<<grid_dim, block>>>(yValue, dColInd, dMatPos, dPValsCompact, dVectorData, numDims,
+                                            totalNumNoneZero);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Cleanup: free compact P vals, colInd, matPos; keep rowInd as yIndex
+    CUDA_CHECK(cudaFree(dPValsCompact));
+    CUDA_CHECK(cudaFree(dColInd));
+    CUDA_CHECK(cudaFree(dMatPos));
+
+    return new GridAsSparseMatrix{P_row_nums, numDims, numProcessedNonZero, dRowInd, yValue};
+}
+
+GridAsSparseMatrix* SpTSpMMultiplication_v3_L0_nb(SparseTensorCscFormat* P, GridAsSparseMatrix* grid,
+                                                  double* d_P_values, size_t* dColIndBuf, size_t* dRowIndBuf,
+                                                  size_t* dMatrixPosBuf, double* dYValueBuf, size_t* hVectorIndex,
+                                                  size_t* hProcColInd, size_t* hProcRowInd, size_t* hProcMatrixPos) {
+    NvtxProfiler profiler("SpTSpMMultiplication_v3_L0_nb", NvtxProfiler::ColorMode::Fixed, NvtxProfilerColor::Orange);
+
+    const auto numDims = grid->get_dimensions();
+    const auto P_row_nums = P->get_row_nums();
+    const auto grid_size = grid->get_nnz_nums();
+
+    const size_t* h_matrixColPtr = P->get_col_res();
+    const size_t* h_matrixRowInd = P->get_row_ids();
+    double* d_vectorData = const_cast<double*>(grid->get_vals_());
+
+    // Step 1: download grid ids into pre-allocated host buffer (no new[])
+    CUDA_CHECK(cudaMemcpy(hVectorIndex, grid->get_ids_(), grid_size * sizeof(size_t), cudaMemcpyDeviceToHost));
+
+    // Step 2: count output non-zeros
+    unsigned int numProcessedNonZero = 0;
+    for (size_t i = 0; i < grid_size; ++i) {
+        const auto col = hVectorIndex[i];
+        numProcessedNonZero += static_cast<unsigned int>(h_matrixColPtr[col + 1] - h_matrixColPtr[col]);
+    }
+
+    // Step 3: build index arrays into pre-allocated host staging (no new[])
+    unsigned int writeIdx = 0;
+    for (size_t i = 0; i < grid_size; ++i) {
+        const auto col = hVectorIndex[i];
+        const auto colStart = h_matrixColPtr[col];
+        const auto colEnd = h_matrixColPtr[col + 1];
+        for (auto j = colStart; j < colEnd; ++j) {
+            hProcColInd[writeIdx] = i;
+            hProcRowInd[writeIdx] = h_matrixRowInd[j];
+            hProcMatrixPos[writeIdx] = j;
+            ++writeIdx;
+        }
+    }
+
+    // Step 4: upload index arrays into pre-allocated device buffers (no cudaMalloc)
+    CUDA_CHECK(cudaMemcpy(dColIndBuf, hProcColInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dRowIndBuf, hProcRowInd, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dMatrixPosBuf, hProcMatrixPos, numProcessedNonZero * sizeof(size_t), cudaMemcpyHostToDevice));
+
+    // Step 5: launch kernel using pre-allocated yValue buffer (no cudaMalloc)
+    const auto totalNumNoneZero = static_cast<unsigned int>(numProcessedNonZero) * numDims;
+    const dim3 block(512);
+    const dim3 grid_dim((totalNumNoneZero + UNROLL_FACTOR * 512 - 1) / (UNROLL_FACTOR * 512));
+    SpMSpVKernelAOS_v2<<<grid_dim, block>>>(dYValueBuf, dColIndBuf, dMatrixPosBuf, d_P_values, d_vectorData, numDims,
+                                            totalNumNoneZero);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // dRowIndBuf reused as yIndex; dYValueBuf is output vals.
+    // Both owned by IndexData -- do NOT free here.
+    return new GridAsSparseMatrix{P_row_nums, numDims, numProcessedNonZero, dRowIndBuf, dYValueBuf};
 }
