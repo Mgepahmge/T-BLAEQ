@@ -1,8 +1,10 @@
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 #include "IndexData.cuh"
 #include "MemoryPolicy.cuh"
 #include "src/Query/check.cuh"
@@ -188,10 +190,28 @@ void PolicyScheduler::printReport(const IndexData& idx, const IndexPolicy& polic
     os << "    maps (all)    : " << fmtBytes(idx.stats.deviceMaps) << "\n";
 
 
-    os << std::left << std::setw(8) << "Level" << std::setw(12) << "P vals" << std::setw(10) << "radius"
-       << std::setw(14) << "peak cost" << std::setw(6) << "Policy"
-       << "\n";
-    os << std::string(50, '-') << "\n";
+    struct ReportRow {
+        std::string level;
+        std::string pVals;
+        std::string radius;
+        std::string peakCost;
+        std::string policyName;
+    };
+
+    const std::string hLevel = "Level";
+    const std::string hPVals = "P vals";
+    const std::string hRadius = "radius";
+    const std::string hPeak = "peak cost";
+    const std::string hPolicy = "Policy";
+
+    std::vector<ReportRow> rows;
+    rows.reserve(idx.intervals);
+
+    size_t wLevel = hLevel.size();
+    size_t wPVals = hPVals.size();
+    size_t wRadius = hRadius.size();
+    size_t wPeak = hPeak.size();
+    size_t wPolicy = hPolicy.size();
 
     for (size_t l = 0; l < idx.intervals; ++l) {
         const size_t nnz = idx.pTensors[l]->get_nnz_nums();
@@ -207,8 +227,33 @@ void PolicyScheduler::printReport(const IndexData& idx, const IndexPolicy& polic
                                     : // same: pVals resident, tmp+yValue transient
             pv + rv + sp + pv; // L2/L3: all transient, same peak
 
-        os << std::left << std::setw(8) << l << std::setw(12) << fmtBytes(pv) << std::setw(10) << fmtBytes(rv)
-           << std::setw(14) << fmtBytes(peak) << std::setw(6) << levelPolicyName(lp) << "\n";
+        ReportRow row{std::to_string(l), fmtBytes(pv), fmtBytes(rv), fmtBytes(peak), levelPolicyName(lp)};
+        wLevel = std::max(wLevel, row.level.size());
+        wPVals = std::max(wPVals, row.pVals.size());
+        wRadius = std::max(wRadius, row.radius.size());
+        wPeak = std::max(wPeak, row.peakCost.size());
+        wPolicy = std::max(wPolicy, row.policyName.size());
+        rows.push_back(std::move(row));
+    }
+
+    constexpr size_t gap = 2;
+    const std::string sep(gap, ' ');
+    const size_t tableWidth = wLevel + wPVals + wRadius + wPeak + wPolicy + (gap * 4);
+    const int iwLevel = static_cast<int>(wLevel);
+    const int iwPVals = static_cast<int>(wPVals);
+    const int iwRadius = static_cast<int>(wRadius);
+    const int iwPeak = static_cast<int>(wPeak);
+    const int iwPolicy = static_cast<int>(wPolicy);
+
+    os << "  " << std::left << std::setw(iwLevel) << hLevel << sep << std::setw(iwPVals) << hPVals << sep
+       << std::setw(iwRadius) << hRadius << sep << std::setw(iwPeak) << hPeak << sep << std::setw(iwPolicy)
+       << hPolicy << "\n";
+    os << "  " << std::string(tableWidth, '-') << "\n";
+
+    for (const auto& row : rows) {
+        os << "  " << std::right << std::setw(iwLevel) << row.level << sep << std::setw(iwPVals) << row.pVals
+           << sep << std::setw(iwRadius) << row.radius << sep << std::setw(iwPeak) << row.peakCost << sep
+           << std::left << std::setw(iwPolicy) << row.policyName << "\n";
     }
 
     if (policy.anyL0()) {
