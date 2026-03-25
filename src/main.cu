@@ -48,6 +48,9 @@ int main(int argc, char** argv) {
     app.add_option("-k,--knn-k", k,
                    "K for KNN queries (default: 10)");
 
+    bool forceUseCPU = false;
+    app.add_option("--force-cpu", forceUseCPU, "Force CPU index building (default : false)");
+
     // Policy override
     std::string forcePolicyStr;
     app.add_option("--force-policy", forcePolicyStr,
@@ -60,7 +63,7 @@ int main(int argc, char** argv) {
 
     // Build
     if (buildFlag) {
-        QueryHandler handler(datasetPath);
+        QueryHandler handler(forceUseCPU, datasetPath);
         handler.saveIndex(indexPath);
     }
 

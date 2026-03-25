@@ -3,6 +3,7 @@
 #include <iostream>
 #include <numeric>
 #include "IndexBuilder.cuh"
+#include "src/Kmeans/CPUKmeans.cuh"
 #include "src/Kmeans/CUDAKmeans.cuh"
 #include "src/Setup/Setup.cuh"
 #include "src/func.hpp"
@@ -16,7 +17,30 @@ size_t IndexBuilder::computeCentroidCount(size_t dataNums, size_t ratio) {
     return dataNums / ratio;
 }
 
-IndexData* IndexBuilder::build(const double* data, size_t N, size_t D, const std::string& name, size_t height,
+/*!
+ * @brief Return true when the dataset fits in available device memory.
+ *
+ * @details Uses a conservative 85% safety factor (same as the query
+ * scheduler) to avoid OOM during KMeans initialisation and iteration.
+ * The estimate accounts for the flat dataset array plus approximately
+ * one additional copy used by cuVS internally during fitting.
+ *
+ * @param[in] N    Number of data points.
+ * @param[in] D    Data dimensionality.
+ * @return True when GPU KMeans can be used safely.
+ */
+static bool datasetFitsInGPU(size_t N, size_t D) {
+    size_t freeMem = 0;
+    size_t totalMem = 0;
+    cudaMemGetInfo(&freeMem, &totalMem);
+
+    // Dataset itself + ~1x overhead for cuVS internal buffers
+    const size_t required = static_cast<size_t>(N * D * sizeof(double) * 2.0);
+    constexpr double kSafetyFactor = 0.85;
+    return required <= static_cast<size_t>(static_cast<double>(freeMem) * kSafetyFactor);
+}
+
+IndexData* IndexBuilder::build(const double* data, size_t N, size_t D, const std::string& name, const bool forceUseCPU, size_t height,
                                const std::vector<size_t>& ratios) {
     assert(height >= 2);
     assert(ratios.size() == height - 1);
@@ -33,62 +57,79 @@ IndexData* IndexBuilder::build(const double* data, size_t N, size_t D, const std
     idx->pTensors.resize(idx->intervals, nullptr);
     idx->meshMaxRadius.resize(idx->intervals, nullptr);
     idx->maps.resize(height, nullptr);
-    idx->dMaps.resize(height); // DeviceBuffer is default-constructible (empty)
+    idx->dMaps.resize(height);
 
-    // Iterative KMeans + P-tensor construction
-    //   level 0 = coarsest,  level (height-1) = finest
-    //   We build from fine -> coarse, so the first KMeans call operates on
-    //   the full dataset (finest mesh).
     constexpr size_t kMaxIter = 7;
 
-    auto* kmeans = new CUDAKmeans(data, N, D, /*isAos=*/true);
+    // Select KMeans backend based on available device memory.
+    // CPUKmeans and CUDAKmeans expose an identical interface so the build
+    // loop below is backend-agnostic.
+    bool useGPU = datasetFitsInGPU(N, D);
+
+    if (forceUseCPU) {
+        useGPU = false;
+    }
+
+    if (useGPU) {
+        std::cout << "KMeans backend: GPU (cuVS)\n";
+    } else {
+        std::cout << "KMeans backend: CPU fallback (dataset too large for device memory)\n";
+    }
 
     std::cout << "Building hierarchical index (" << height << " levels, " << idx->intervals << " P-tensors)\n"
               << "Level 0 = coarsest, level " << (height - 1) << " = finest\n\n";
 
-    for (size_t i = 0; i < idx->intervals; ++i) {
-        const size_t dataNums = kmeans->getdatas().size();
-        const size_t centroidNums = computeCentroidCount(dataNums, ratios[i]);
-        const size_t fineIdx = idx->intervals - i; // current fine level
-        const size_t coarseIdx = fineIdx - 1; // target coarse level
-        const size_t pTensorIdx = coarseIdx; // slot in pTensors[]
+    // Use a type-erased lambda to run the build loop with either backend,
+    // avoiding code duplication.
+    auto runBuild = [&](auto& kmeans) {
+        for (size_t i = 0; i < idx->intervals; ++i) {
+            const size_t dataNums = kmeans.getdatas().size();
+            const size_t centroidNums = computeCentroidCount(dataNums, ratios[i]);
+            const size_t fineIdx = idx->intervals - i;
+            const size_t coarseIdx = fineIdx - 1;
+            const size_t pTensorIdx = coarseIdx;
 
-        idx->meshSizes.push_back(dataNums);
+            idx->meshSizes.push_back(dataNums);
 
-        printf("Mesh_%zu -> Mesh_%zu  KMeans  (%zu -> %zu points)\n", fineIdx, coarseIdx, dataNums, centroidNums);
+            printf("Mesh_%zu -> Mesh_%zu  KMeans  (%zu -> %zu points)\n", fineIdx, coarseIdx, dataNums,
+                   centroidNums);
 
-        auto t0 = std::chrono::steady_clock::now();
-        kmeans->run(centroidNums, kMaxIter);
-        auto t1 = std::chrono::steady_clock::now();
-        Chrono::printElapsed("  KMeans", t0, t1);
+            auto t0 = std::chrono::steady_clock::now();
+            kmeans.run(centroidNums, kMaxIter);
+            auto t1 = std::chrono::steady_clock::now();
+            Chrono::printElapsed("  KMeans", t0, t1);
 
-        // Build one P-tensor (fine -> coarse prolongation operator in CSC).
-        // Also produces the sort-to-original map for the fine level.
-        auto tP0 = std::chrono::steady_clock::now();
-        idx->pTensors[pTensorIdx] = Genenate_One_P_Tensor(D, dataNums, centroidNums, kmeans, idx->maps[fineIdx]);
-        assert(idx->maps[fineIdx] != nullptr);
-        auto tP1 = std::chrono::steady_clock::now();
-        Chrono::printElapsed("  P-tensor build", tP0, tP1);
+            auto tP0 = std::chrono::steady_clock::now();
+            idx->pTensors[pTensorIdx] =
+                Genenate_One_P_Tensor(D, dataNums, centroidNums, &kmeans, idx->maps[fineIdx]);
+            assert(idx->maps[fineIdx] != nullptr);
+            auto tP1 = std::chrono::steady_clock::now();
+            Chrono::printElapsed("  P-tensor build", tP0, tP1);
 
-        // Compute max radius for the coarse level.
-        auto tR0 = std::chrono::steady_clock::now();
-        idx->meshMaxRadius[pTensorIdx] =
-            Compute_Max_Radius(D, idx->pTensors[pTensorIdx]->get_col_res(), idx->maps[fineIdx], kmeans);
-        auto tR1 = std::chrono::steady_clock::now();
-        Chrono::printElapsed("  MaxRadius", tR0, tR1);
+            auto tR0 = std::chrono::steady_clock::now();
+            idx->meshMaxRadius[pTensorIdx] =
+                Compute_Max_Radius(D, idx->pTensors[pTensorIdx]->get_col_res(), idx->maps[fineIdx], &kmeans);
+            auto tR1 = std::chrono::steady_clock::now();
+            Chrono::printElapsed("  MaxRadius", tR0, tR1);
 
-        // On last iteration: record coarsest mesh + centroid count.
-        if (i + 2 == height) {
-            const auto& centroids = kmeans->getCentroids();
-            idx->meshSizes.push_back(centroids.size());
-            idx->coarsestMesh = new GridAsSparseMatrix(centroids, 0, centroids.size());
+            if (i + 2 == height) {
+                const auto& centroids = kmeans.getCentroids();
+                idx->meshSizes.push_back(centroids.size());
+                idx->coarsestMesh = new GridAsSparseMatrix(centroids, 0, centroids.size());
+            }
+
+            kmeans.reset();
+            std::cout << "\n";
         }
+    };
 
-        kmeans->reset();
-        std::cout << "\n";
+    if (useGPU) {
+        CUDAKmeans kmeans(data, N, D, /*isAos=*/true);
+        runBuild(kmeans);
+    } else {
+        CPUKmeans kmeans(data, N, D, /*isAos=*/true);
+        runBuild(kmeans);
     }
-
-    delete kmeans;
 
     // Print mesh size summary
     std::cout << "Mesh sizes (finest -> coarsest): " << idx->meshSizes[0];
@@ -96,9 +137,6 @@ IndexData* IndexBuilder::build(const double* data, size_t N, size_t D, const std
         std::cout << " -> " << idx->meshSizes[i];
     }
     std::cout << "\n";
-
-    // Device upload is deferred to IndexData::prepareForQuery(),
-    // which selects the appropriate per-level policy first.
 
     return idx;
 }

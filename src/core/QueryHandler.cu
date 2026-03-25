@@ -5,7 +5,7 @@
 #include "src/func.hpp"
 #include "src/utils/Utils.cuh"
 
-QueryHandler::QueryHandler(const std::string& datasetPath) {
+QueryHandler::QueryHandler(const bool forceUseCPU, const std::string& datasetPath) {
     std::cout << "T-BLAEQ: building index from " << datasetPath << "\n";
 
     const std::string name = extractDatasetName(datasetPath);
@@ -13,7 +13,7 @@ QueryHandler::QueryHandler(const std::string& datasetPath) {
 
     const auto t0 = std::chrono::steady_clock::now();
     idx_.reset(
-        IndexBuilder::build(dataset.data, static_cast<size_t>(dataset.size), static_cast<size_t>(dataset.dim), name));
+        IndexBuilder::build(dataset.data, static_cast<size_t>(dataset.size), static_cast<size_t>(dataset.dim), name, forceUseCPU));
     const auto t1 = std::chrono::steady_clock::now();
     Chrono::printElapsed("Index build total", t0, t1);
 }

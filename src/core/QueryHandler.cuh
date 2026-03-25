@@ -52,8 +52,9 @@ public:
      * @brief Build a new index from a raw dataset on disk.
      *
      * @param[in] datasetPath Path to the dataset file used to build the index.
+     * @param[in] forceUseCPU
      */
-    explicit QueryHandler(const std::string& datasetPath);
+    explicit QueryHandler(bool forceUseCPU, const std::string& datasetPath);
 
     /*!
      * @brief Load a previously serialised index from disk.

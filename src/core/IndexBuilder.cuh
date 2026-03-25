@@ -42,11 +42,12 @@ public:
      * @param[in] N       Total number of data points.
      * @param[in] D       Dimensionality of each point.
      * @param[in] name    Human-readable dataset label stored in IndexData for logging.
+     * @param[in] forceUseCPU
      * @param[in] height  Total number of mesh levels including the finest.
      * @param[in] ratios  Coarsening ratio per level; length must equal height - 1.
      * @return Heap-allocated IndexData containing the fully built host-side index.
      */
-    static IndexData* build(const double* data, size_t N, size_t D, const std::string& name,
+    static IndexData* build(const double* data, size_t N, size_t D, const std::string& name, bool forceUseCPU = false,
                             size_t height = kDefaultHeight, const std::vector<size_t>& ratios = kDefaultRatios);
 
 private:
