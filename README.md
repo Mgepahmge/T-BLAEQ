@@ -1,6 +1,6 @@
 # T-BLAEQ
 
-**T-BLAEQ** (Tile-Based Layered Approximate Exact Query) is the official implementation for our submitted paper to VLDB 2026 titled:  
+**T-BLAEQ** (Tensor BLAS-based CAE Query) is the official implementation for our submitted paper to VLDB 2026 titled:  
 *"T-BLAEQ: A Tensor-Based Multigrid Index for GPU-Accelerated Multi-dimensional Query Processing"*
 
 The code is fully implemented in CUDA C/C++.

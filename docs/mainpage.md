@@ -1,6 +1,6 @@
 # T-BLAEQ {#mainpage}
 
-**T-BLAEQ** (Tile-Based Layered Approximate Exact Query) is a GPU-accelerated
+**T-BLAEQ** (Tensor BLAS-based CAE Query) is a GPU-accelerated
 hierarchical mesh index designed for fast range and K-nearest-neighbour (KNN)
 queries over large high-dimensional datasets.
 
