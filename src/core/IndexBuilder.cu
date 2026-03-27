@@ -124,8 +124,16 @@ IndexData* IndexBuilder::build(const double* data, size_t N, size_t D, const std
     };
 
     if (useGPU) {
-        CUDAKmeans kmeans(data, N, D, /*isAos=*/true);
-        runBuild(kmeans);
+        try
+        {
+            CUDAKmeans kmeans(data, N, D, /*isAos=*/true);
+            runBuild(kmeans);
+        } catch (std::exception& e) {
+            std::cout << "Error building kmeans: " << e.what() << "\n";
+            std::cout << "Trying CPU Kmeans..." << std::endl;
+            CPUKmeans kmeans(data, N, D, true);
+            runBuild(kmeans);
+        }
     } else {
         CPUKmeans kmeans(data, N, D, /*isAos=*/true);
         runBuild(kmeans);

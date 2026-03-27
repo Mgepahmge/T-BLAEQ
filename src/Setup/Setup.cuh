@@ -100,7 +100,10 @@ SparseTensorCscFormat* Genenate_One_P_Tensor(size_t D, size_t pRowLen, size_t pC
     std::for_each(labels.begin(), labels.end(), [&nnzPerCol](int id) { ++nnzPerCol[id]; });
 
     const size_t maxNnzPerCol = *std::max_element(nnzPerCol.begin(), nnzPerCol.end());
-    assert(maxNnzPerCol > 0);
+    if (maxNnzPerCol <= 0) {
+        std::cout << "WARNING : " << maxNnzPerCol << " nnz column is negative\n";
+        throw std::runtime_error("");
+    }
     std::cout << "max_nnz_per_col: " << maxNnzPerCol << "\n";
 
     // Temporary batch buffer (+10 to avoid boundary issues)

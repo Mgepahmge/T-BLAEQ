@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-list(APPEND CMAKE_PREFIX_PATH "/opt/miniconda3")
+list(APPEND CMAKE_PREFIX_PATH "/opt/miniforge3")
 
 project(T-BLAEQ CUDA CXX)
 
@@ -10,9 +10,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 set(CMAKE_CUDA_ARCHITECTURES native)
 
-link_directories(BEFORE /opt/miniconda3/lib)
+link_directories(BEFORE /opt/miniforge3/lib)
 add_link_options("-Wl,--disable-new-dtags")
-add_link_options("-L/opt/miniconda3/lib")
+add_link_options("-L/opt/miniforge3/lib")
 
 find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP      REQUIRED)
