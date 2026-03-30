@@ -96,9 +96,20 @@ void IndexData::allocL0WorkBuffers() {
         return;
     }
 
+    // L0 work buffers are only used by levels assigned to L0.
+    // Sizing them from all levels can over-allocate dramatically in mixed
+    // policies (e.g., small coarse L0 levels + huge fine L2/L3 levels).
     size_t maxNnz = 0;
     for (size_t l = 0; l < intervals; ++l) {
+        if (activePolicy.levels[l] != LevelPolicy::L0) {
+            continue;
+        }
         maxNnz = std::max(maxNnz, pTensors[l]->get_nnz_nums());
+    }
+    if (maxNnz == 0) {
+        // Defensive: no L0 level means no L0 work buffers are required.
+        l0Bufs.ready = true;
+        return;
     }
     const size_t maxNProc = (maxNnz + 127) / 128;
 
@@ -113,7 +124,9 @@ void IndexData::allocL0WorkBuffers() {
 
     l0Bufs.dYValue.resize(intervals);
     for (size_t l = 0; l < intervals; ++l) {
-        l0Bufs.dYValue[l].resize(pTensors[l]->get_nnz_nums() * D);
+        if (activePolicy.levels[l] == LevelPolicy::L0) {
+            l0Bufs.dYValue[l].resize(pTensors[l]->get_nnz_nums() * D);
+        }
     }
 
     l0Bufs.hVectorIndex = new size_t[maxNnz];
@@ -157,14 +170,18 @@ void IndexData::computeStats() {
         stats.devicePTensorVals += t->get_nnz_nums() * t->get_dim() * sizeof(double);
     }
     for (size_t i = 1; i < height; ++i) {
-        if (!dMaps[i].empty()) {
-            stats.deviceMaps += dMaps[i].size() * sizeof(size_t);
+        if (maps[i]) {
+            stats.deviceMaps += meshSizes[intervals - i] * sizeof(size_t);
         }
     }
     for (size_t i = 0; i < intervals; ++i) {
         stats.deviceRadius += meshSizes[intervals - i] * sizeof(double);
     }
-    stats.deviceCoarsestMesh = dCoarsestMeshIds.size() * sizeof(size_t) + dCoarsestMeshVals.size() * sizeof(double);
+    if (coarsestMesh) {
+        const size_t nnz = coarsestMesh->get_nnz_nums();
+        const size_t dim = coarsestMesh->get_dimensions();
+        stats.deviceCoarsestMesh = nnz * sizeof(size_t) + nnz * dim * sizeof(double);
+    }
 
     // L0 SpTSpM pre-alloc (if all levels L0)
     for (size_t l = 0; l < intervals; ++l) {
