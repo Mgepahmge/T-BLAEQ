@@ -16,6 +16,7 @@
 #pragma once
 
 #include <iosfwd>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -53,8 +54,12 @@ public:
      *
      * @param[in] datasetPath Path to the dataset file used to build the index.
      * @param[in] forceUseCPU
+     * @param[in] height  Total number of mesh levels.
+     * @param[in] ratios  Coarsening ratio per level; length must equal height - 1.
      */
-    explicit QueryHandler(bool forceUseCPU, const std::string& datasetPath);
+    explicit QueryHandler(bool forceUseCPU, const std::string& datasetPath,
+                          size_t height = IndexBuilder::kDefaultHeight,
+                          const std::vector<size_t>& ratios = IndexBuilder::kDefaultRatios);
 
     /*!
      * @brief Build an index from randomly generated synthetic data.
@@ -68,9 +73,17 @@ public:
      * @param[in] valMin  Lower bound of the generated value range (must be > 0).
      * @param[in] valMax  Upper bound of the generated value range.
      * @param[in] isInt   When true, all generated coordinates are integers.
+     * @param[in] height  Total number of mesh levels.
+     * @param[in] ratios  Coarsening ratio per level; length must equal height - 1.
+     * @param[in] seed    Random seed used by RandomKmeans.
+     * @param[in] sigmaDivisor
+     *                    Controls random spread per level: sigma = spacing / sigmaDivisor.
      * @param[in] name    Human-readable label stored in IndexData for logging.
      */
     QueryHandler(size_t N, size_t D, double valMin, double valMax, bool isInt,
+                 size_t height = IndexBuilder::kDefaultHeight,
+                 const std::vector<size_t>& ratios = IndexBuilder::kDefaultRatios,
+                 uint64_t seed = 12345, double sigmaDivisor = 3.0,
                  const std::string& name = "random");
 
     /*!

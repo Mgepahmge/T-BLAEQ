@@ -152,7 +152,8 @@ IndexData* IndexBuilder::build(const double* data, size_t N, size_t D, const std
 
 IndexData* IndexBuilder::buildRandom(size_t N, size_t D, double valMin, double valMax, bool isInt,
                                      const std::string& name, size_t height,
-                                     const std::vector<size_t>& ratios) {
+                                     const std::vector<size_t>& ratios,
+                                     const uint64_t seed, const double sigmaDivisor) {
     assert(height >= 2);
     assert(ratios.size() == height - 1);
 
@@ -174,7 +175,10 @@ IndexData* IndexBuilder::buildRandom(size_t N, size_t D, double valMin, double v
     std::cout << "Building hierarchical index (" << height << " levels, " << idx->intervals << " P-tensors)\n"
               << "Level 0 = coarsest, level " << (height - 1) << " = finest\n\n";
 
-    RandomKmeans kmeans(N, D, ratios, valMin, valMax, isInt);
+    RandomKmeans::Config randomCfg;
+    randomCfg.seed = seed;
+    randomCfg.sigmaDivisor = sigmaDivisor;
+    RandomKmeans kmeans(N, D, ratios, valMin, valMax, isInt, randomCfg);
 
     auto runBuild = [&](auto& km) {
         for (size_t i = 0; i < idx->intervals; ++i) {

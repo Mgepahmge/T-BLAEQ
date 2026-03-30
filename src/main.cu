@@ -1,10 +1,32 @@
 #include <iostream>
 #include <filesystem>
+#include <sstream>
 #include <string>
+#include <vector>
 #include "CLI11.hpp"
 #include "src/core/QueryHandler.cuh"
 #include "src/core/QueryEngine.cuh"    // saveQueryResult
 #include "src/core/MemoryPolicy.cuh"   // IndexPolicy::parseLevel
+
+static std::vector<size_t> parseRatiosCsv(const std::string& s) {
+    std::vector<size_t> ratios;
+    std::stringstream ss(s);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        if (token.empty()) {
+            throw std::invalid_argument("Invalid --ratios: empty segment in '" + s + "'");
+        }
+        const size_t r = static_cast<size_t>(std::stoull(token));
+        if (r == 0) {
+            throw std::invalid_argument("Invalid --ratios: ratio must be > 0");
+        }
+        ratios.push_back(r);
+    }
+    if (ratios.empty()) {
+        throw std::invalid_argument("Invalid --ratios: no ratios parsed from '" + s + "'");
+    }
+    return ratios;
+}
 
 int main(int argc, char** argv) {
 
@@ -54,17 +76,29 @@ int main(int argc, char** argv) {
     bool forceUseCPU = false;
     app.add_option("--force-cpu", forceUseCPU, "Force CPU index building (default : false)");
 
+    // Index hierarchy parameters (apply to both --build-index and --gen-index)
+    size_t buildHeight = 4;
+    std::string buildRatiosStr = "100,50,20";
+    app.add_option("--height", buildHeight, "Hierarchy height (levels), must be >= 2 (default: 4)");
+    app.add_option("--ratios", buildRatiosStr,
+                   "Comma-separated coarsening ratios, count must equal height-1 (default: 100,50,20)");
+
     // Random index generation parameters
     size_t genN = 1000000;
     size_t genD = 3;
     double genMin = 1.0;
     double genMax = 100.0;
     bool   genInt = false;
+    uint64_t genSeed = 12345;
+    double genSigmaDivisor = 3.0;
     app.add_option("--gen-N",   genN,   "Number of points at the finest mesh level (default: 1000000)");
     app.add_option("--gen-D",   genD,   "Dimensionality of each point (default: 3)");
     app.add_option("--gen-min", genMin, "Lower bound of the value range, must be > 0 (default: 1.0)");
     app.add_option("--gen-max", genMax, "Upper bound of the value range (default: 100.0)");
     app.add_flag  ("--gen-int", genInt, "Generate integer coordinates (default: false)");
+    app.add_option("--gen-seed", genSeed, "Random seed for RandomKmeans hierarchy generation (default: 12345)");
+    app.add_option("--gen-sigma-divisor", genSigmaDivisor,
+                   "Random spread control: sigma = spacing/divisor, must be > 0 (default: 3.0)");
 
     // Policy override
     std::string forcePolicyStr;
@@ -76,15 +110,27 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
+    if (buildHeight < 2) {
+        throw std::runtime_error("--height must be >= 2");
+    }
+    const std::vector<size_t> buildRatios = parseRatiosCsv(buildRatiosStr);
+    if (buildRatios.size() != buildHeight - 1) {
+        throw std::runtime_error("--ratios count must equal --height - 1");
+    }
+
     // Build
     if (buildFlag) {
-        QueryHandler handler(forceUseCPU, datasetPath);
+        QueryHandler handler(forceUseCPU, datasetPath, buildHeight, buildRatios);
         handler.saveIndex(indexPath);
     }
 
     // Generate random index
     if (genFlag) {
-        QueryHandler handler(genN, genD, genMin, genMax, genInt);
+        if (genSigmaDivisor <= 0.0) {
+            throw std::runtime_error("--gen-sigma-divisor must be > 0");
+        }
+
+        QueryHandler handler(genN, genD, genMin, genMax, genInt, buildHeight, buildRatios, genSeed, genSigmaDivisor);
         handler.saveIndex(indexPath);
     }
 

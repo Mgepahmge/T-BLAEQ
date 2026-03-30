@@ -35,6 +35,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <random>
 #include <stdexcept>
 #include <vector>
@@ -61,6 +62,13 @@ class RandomKmeans {
 public:
     using Point = std::vector<double>;
 
+    struct Config {
+        uint64_t seed; //!< RNG seed used for hierarchy generation.
+        double sigmaDivisor; //!< sigma = spacing / sigmaDivisor, must be > 0.
+        Config(uint64_t seedIn = 12345, double sigmaDivisorIn = 3.0)
+            : seed(seedIn), sigmaDivisor(sigmaDivisorIn) {}
+    };
+
     /*!
      * @brief Pre-generate the full coarse-to-fine hierarchy.
      *
@@ -80,12 +88,14 @@ public:
      * @throws std::invalid_argument When valMin <= 0 or valMin >= valMax.
      */
     RandomKmeans(size_t N, size_t D, const std::vector<size_t>& ratios, double valMin, double valMax,
-                 bool isInt)
-        : D_(D), isInt_(isInt), valMin_(valMin), valMax_(valMax), cursor_(0) {
+                 bool isInt, Config cfg = Config())
+        : D_(D), isInt_(isInt), valMin_(valMin), valMax_(valMax), cursor_(0), cfg_(cfg) {
         if (valMin <= 0.0)
             throw std::invalid_argument("RandomKmeans: valMin must be > 0");
         if (valMin >= valMax)
             throw std::invalid_argument("RandomKmeans: valMin must be < valMax");
+        if (cfg_.sigmaDivisor <= 0.0)
+            throw std::invalid_argument("RandomKmeans: sigmaDivisor must be > 0");
 
         generate(N, ratios);
         if (!layerPoints_.empty()) {
@@ -144,6 +154,7 @@ private:
     double valMin_;
     double valMax_;
     size_t cursor_;
+    Config cfg_;
 
     // layerPoints_[0] = finest, layerPoints_.back() = coarsest
     std::vector<std::vector<Point>>  layerPoints_;
@@ -163,7 +174,7 @@ private:
      * @param[in] ratios Coarsening ratios in finest-to-coarsest order.
      */
     void generate(size_t N, const std::vector<size_t>& ratios) {
-        std::mt19937_64 rng(12345);
+        std::mt19937_64 rng(cfg_.seed);
 
         const size_t intervals = ratios.size();
 
@@ -213,7 +224,7 @@ private:
             //   (valMax - valMin) / nParents^(1/D) / 3
             const double spacing =
                 (valMax_ - valMin_) / std::pow(static_cast<double>(nParents), 1.0 / static_cast<double>(D_));
-            const double sigma = spacing / 3.0;
+            const double sigma = spacing / cfg_.sigmaDivisor;
 
             std::normal_distribution<double> normDist(0.0, sigma);
 

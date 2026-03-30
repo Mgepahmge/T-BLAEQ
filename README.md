@@ -55,12 +55,21 @@ After building, run the program from the build directory:
 - `-k, --K INT` - Number of neighbors for KNN query (default: 10)
 - `-r TEXT` - Path to save query results (e.g., `results.csv`)
 - `--force-policy TEXT` - Force a specific memory policy for benchmarking (e.g., `L0`, `L1`, `L2`, `L3`)
+- `--height INT` - Hierarchy height for index building (both `--build-index` and `--gen-index`) (default: 4)
+- `--ratios TEXT` - Comma-separated coarsening ratios for index building (both `--build-index` and `--gen-index`) (default: `100,50,20`)
+- `--gen-seed INT` - Random seed for RandomKmeans synthetic hierarchy (default: 12345)
+- `--gen-sigma-divisor FLOAT` - Random spread control in RandomKmeans: `sigma = spacing/divisor` (default: 3.0)
 
 #### CLI Examples
 
 **Build an index:**
 ```bash
 ./T-BLAEQ --build-index -d dataset.txt -i indexes/my_index/
+```
+
+**Generate a random index with controllable hierarchy/noise:**
+```bash
+./T-BLAEQ --gen-index --gen-N 500000 --gen-D 5 --height 4 --ratios 80,40,20 --gen-seed 20260330 --gen-sigma-divisor 2.2 -i indexes/random_index/
 ```
 
 **Run range queries:**

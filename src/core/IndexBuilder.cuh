@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include "IndexData.cuh"
 #include "src/Data_Structures/Data_Structures.cuh"
@@ -71,12 +72,18 @@ public:
      * @param[in] name    Human-readable label stored in IndexData for logging.
      * @param[in] height  Total number of mesh levels.
      * @param[in] ratios  Coarsening ratio per level; length must equal height - 1.
+     * @param[in] seed    Random seed used by RandomKmeans.
+     * @param[in] sigmaDivisor
+     *                    Controls random spread per level: sigma = spacing / sigmaDivisor.
+     *                    Must be > 0. Larger values generate tighter clusters.
      * @return Heap-allocated IndexData. Caller owns.
      */
     static IndexData* buildRandom(size_t N, size_t D, double valMin, double valMax, bool isInt,
                                   const std::string& name    = "random",
                                   size_t             height  = kDefaultHeight,
-                                  const std::vector<size_t>& ratios = kDefaultRatios);
+                                  const std::vector<size_t>& ratios = kDefaultRatios,
+                                  uint64_t seed = 12345,
+                                  double sigmaDivisor = 3.0);
 
 private:
     /*!

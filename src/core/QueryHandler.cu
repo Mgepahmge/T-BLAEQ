@@ -5,26 +5,44 @@
 #include "src/func.hpp"
 #include "src/utils/Utils.cuh"
 
-QueryHandler::QueryHandler(const bool forceUseCPU, const std::string& datasetPath) {
+QueryHandler::QueryHandler(const bool forceUseCPU, const std::string& datasetPath,
+                           const size_t height, const std::vector<size_t>& ratios) {
     std::cout << "T-BLAEQ: building index from " << datasetPath << "\n";
+    std::cout << "Build config: height=" << height << " ratios=[";
+    for (size_t i = 0; i < ratios.size(); ++i) {
+        if (i) {
+            std::cout << ",";
+        }
+        std::cout << ratios[i];
+    }
+    std::cout << "]\n";
 
     const std::string name = extractDatasetName(datasetPath);
     const PointCloud dataset = loadFromFile(datasetPath);
 
     const auto t0 = std::chrono::steady_clock::now();
-    idx_.reset(
-        IndexBuilder::build(dataset.data, static_cast<size_t>(dataset.size), static_cast<size_t>(dataset.dim), name, forceUseCPU));
+    idx_.reset(IndexBuilder::build(dataset.data, static_cast<size_t>(dataset.size), static_cast<size_t>(dataset.dim),
+                                   name, forceUseCPU, height, ratios));
     const auto t1 = std::chrono::steady_clock::now();
     Chrono::printElapsed("Index build total", t0, t1);
 }
 
-QueryHandler::QueryHandler(size_t N, size_t D, double valMin, double valMax, bool isInt,
+QueryHandler::QueryHandler(size_t N, size_t D, double valMin, double valMax, bool isInt, size_t height,
+                           const std::vector<size_t>& ratios, uint64_t seed, double sigmaDivisor,
                            const std::string& name) {
     std::cout << "T-BLAEQ: generating random index (N=" << N << " D=" << D << " range=["
               << valMin << "," << valMax << "] " << (isInt ? "int" : "float") << ")\n";
+    std::cout << "RandomKmeans config: height=" << height << " ratios=[";
+    for (size_t i = 0; i < ratios.size(); ++i) {
+        if (i) {
+            std::cout << ",";
+        }
+        std::cout << ratios[i];
+    }
+    std::cout << "] seed=" << seed << " sigmaDivisor=" << sigmaDivisor << "\n";
 
     const auto t0 = std::chrono::steady_clock::now();
-    idx_.reset(IndexBuilder::buildRandom(N, D, valMin, valMax, isInt, name));
+    idx_.reset(IndexBuilder::buildRandom(N, D, valMin, valMax, isInt, name, height, ratios, seed, sigmaDivisor));
     const auto t1 = std::chrono::steady_clock::now();
     Chrono::printElapsed("Index build total", t0, t1);
 }
