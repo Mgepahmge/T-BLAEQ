@@ -13,11 +13,14 @@ int main(int argc, char** argv) {
     // Mode
     bool buildFlag = false;
     bool queryFlag = false;
+    bool genFlag   = false;
     auto* modeGroup = app.add_option_group("mode");
     modeGroup->add_flag("--build-index", buildFlag,
                         "Build and save index from dataset");
     modeGroup->add_flag("--test-query",  queryFlag,
                         "Run queries against a saved index");
+    modeGroup->add_flag("--gen-index",   genFlag,
+                        "Generate a random synthetic index and save it");
     modeGroup->require_option(1, 1);
 
     // Paths
@@ -51,6 +54,18 @@ int main(int argc, char** argv) {
     bool forceUseCPU = false;
     app.add_option("--force-cpu", forceUseCPU, "Force CPU index building (default : false)");
 
+    // Random index generation parameters
+    size_t genN = 1000000;
+    size_t genD = 3;
+    double genMin = 1.0;
+    double genMax = 100.0;
+    bool   genInt = false;
+    app.add_option("--gen-N",   genN,   "Number of points at the finest mesh level (default: 1000000)");
+    app.add_option("--gen-D",   genD,   "Dimensionality of each point (default: 3)");
+    app.add_option("--gen-min", genMin, "Lower bound of the value range, must be > 0 (default: 1.0)");
+    app.add_option("--gen-max", genMax, "Upper bound of the value range (default: 100.0)");
+    app.add_flag  ("--gen-int", genInt, "Generate integer coordinates (default: false)");
+
     // Policy override
     std::string forcePolicyStr;
     app.add_option("--force-policy", forcePolicyStr,
@@ -64,6 +79,12 @@ int main(int argc, char** argv) {
     // Build
     if (buildFlag) {
         QueryHandler handler(forceUseCPU, datasetPath);
+        handler.saveIndex(indexPath);
+    }
+
+    // Generate random index
+    if (genFlag) {
+        QueryHandler handler(genN, genD, genMin, genMax, genInt);
         handler.saveIndex(indexPath);
     }
 

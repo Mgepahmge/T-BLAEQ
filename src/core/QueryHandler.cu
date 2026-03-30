@@ -18,6 +18,17 @@ QueryHandler::QueryHandler(const bool forceUseCPU, const std::string& datasetPat
     Chrono::printElapsed("Index build total", t0, t1);
 }
 
+QueryHandler::QueryHandler(size_t N, size_t D, double valMin, double valMax, bool isInt,
+                           const std::string& name) {
+    std::cout << "T-BLAEQ: generating random index (N=" << N << " D=" << D << " range=["
+              << valMin << "," << valMax << "] " << (isInt ? "int" : "float") << ")\n";
+
+    const auto t0 = std::chrono::steady_clock::now();
+    idx_.reset(IndexBuilder::buildRandom(N, D, valMin, valMax, isInt, name));
+    const auto t1 = std::chrono::steady_clock::now();
+    Chrono::printElapsed("Index build total", t0, t1);
+}
+
 QueryHandler::QueryHandler(const std::string& indexPath, bool loadFromIndex) {
     if (!loadFromIndex) {
         throw std::invalid_argument("Use QueryHandler(datasetPath) to build a new index.");

@@ -57,6 +57,23 @@ public:
     explicit QueryHandler(bool forceUseCPU, const std::string& datasetPath);
 
     /*!
+     * @brief Build an index from randomly generated synthetic data.
+     *
+     * @details Uses IndexBuilder::buildRandom() to generate a synthetic
+     * multi-level dataset instantly without loading or clustering real data.
+     * Intended for rapid testing of the query pipeline.
+     *
+     * @param[in] N       Number of points at the finest mesh level.
+     * @param[in] D       Dimensionality of each point.
+     * @param[in] valMin  Lower bound of the generated value range (must be > 0).
+     * @param[in] valMax  Upper bound of the generated value range.
+     * @param[in] isInt   When true, all generated coordinates are integers.
+     * @param[in] name    Human-readable label stored in IndexData for logging.
+     */
+    QueryHandler(size_t N, size_t D, double valMin, double valMax, bool isInt,
+                 const std::string& name = "random");
+
+    /*!
      * @brief Load a previously serialised index from disk.
      *
      * @param[in] indexPath      Directory path containing the serialised index files.

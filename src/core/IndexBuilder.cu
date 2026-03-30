@@ -4,6 +4,7 @@
 #include <numeric>
 #include "IndexBuilder.cuh"
 #include "src/Kmeans/CPUKmeans.cuh"
+#include "src/Kmeans/RandomKmeans.cuh"
 #include "src/Kmeans/CUDAKmeans.cuh"
 #include "src/Setup/Setup.cuh"
 #include "src/func.hpp"
@@ -140,6 +141,85 @@ IndexData* IndexBuilder::build(const double* data, size_t N, size_t D, const std
     }
 
     // Print mesh size summary
+    std::cout << "Mesh sizes (finest -> coarsest): " << idx->meshSizes[0];
+    for (size_t i = 1; i < idx->meshSizes.size(); ++i) {
+        std::cout << " -> " << idx->meshSizes[i];
+    }
+    std::cout << "\n";
+
+    return idx;
+}
+
+IndexData* IndexBuilder::buildRandom(size_t N, size_t D, double valMin, double valMax, bool isInt,
+                                     const std::string& name, size_t height,
+                                     const std::vector<size_t>& ratios) {
+    assert(height >= 2);
+    assert(ratios.size() == height - 1);
+
+    auto* idx = new IndexData();
+    idx->D = D;
+    idx->N = N;
+    idx->height = height;
+    idx->intervals = height - 1;
+    idx->isAosArch = true;
+    idx->datasetName = name;
+    idx->ratios = ratios;
+
+    idx->pTensors.resize(idx->intervals, nullptr);
+    idx->meshMaxRadius.resize(idx->intervals, nullptr);
+    idx->maps.resize(height, nullptr);
+    idx->dMaps.resize(height);
+
+    std::cout << "KMeans backend: Random (synthetic data generation)\n";
+    std::cout << "Building hierarchical index (" << height << " levels, " << idx->intervals << " P-tensors)\n"
+              << "Level 0 = coarsest, level " << (height - 1) << " = finest\n\n";
+
+    RandomKmeans kmeans(N, D, ratios, valMin, valMax, isInt);
+
+    auto runBuild = [&](auto& km) {
+        for (size_t i = 0; i < idx->intervals; ++i) {
+            const size_t dataNums = km.getdatas().size();
+            const size_t centroidNums = computeCentroidCount(dataNums, ratios[i]);
+            const size_t fineIdx = idx->intervals - i;
+            const size_t coarseIdx = fineIdx - 1;
+            const size_t pTensorIdx = coarseIdx;
+
+            idx->meshSizes.push_back(dataNums);
+
+            printf("Mesh_%zu -> Mesh_%zu  Random  (%zu -> %zu points)\n", fineIdx, coarseIdx, dataNums,
+                   centroidNums);
+
+            auto t0 = std::chrono::steady_clock::now();
+            km.run(centroidNums, 0);
+            auto t1 = std::chrono::steady_clock::now();
+            Chrono::printElapsed("  Random gen", t0, t1);
+
+            auto tP0 = std::chrono::steady_clock::now();
+            idx->pTensors[pTensorIdx] =
+                Genenate_One_P_Tensor(D, dataNums, centroidNums, &km, idx->maps[fineIdx]);
+            assert(idx->maps[fineIdx] != nullptr);
+            auto tP1 = std::chrono::steady_clock::now();
+            Chrono::printElapsed("  P-tensor build", tP0, tP1);
+
+            auto tR0 = std::chrono::steady_clock::now();
+            idx->meshMaxRadius[pTensorIdx] =
+                Compute_Max_Radius(D, idx->pTensors[pTensorIdx]->get_col_res(), idx->maps[fineIdx], &km);
+            auto tR1 = std::chrono::steady_clock::now();
+            Chrono::printElapsed("  MaxRadius", tR0, tR1);
+
+            if (i + 2 == height) {
+                const auto& centroids = km.getCentroids();
+                idx->meshSizes.push_back(centroids.size());
+                idx->coarsestMesh = new GridAsSparseMatrix(centroids, 0, centroids.size());
+            }
+
+            km.reset();
+            std::cout << "\n";
+        }
+    };
+
+    runBuild(kmeans);
+
     std::cout << "Mesh sizes (finest -> coarsest): " << idx->meshSizes[0];
     for (size_t i = 1; i < idx->meshSizes.size(); ++i) {
         std::cout << " -> " << idx->meshSizes[i];

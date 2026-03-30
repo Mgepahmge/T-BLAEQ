@@ -50,6 +50,34 @@ public:
     static IndexData* build(const double* data, size_t N, size_t D, const std::string& name, bool forceUseCPU = false,
                             size_t height = kDefaultHeight, const std::vector<size_t>& ratios = kDefaultRatios);
 
+    /*!
+     * @brief Build a hierarchical index from randomly generated synthetic data.
+     *
+     * @details Generates a multi-level random dataset using RandomKmeans and
+     * runs the standard P-tensor and max-radius construction on it.  The
+     * resulting IndexData is structurally identical to one built from a real
+     * dataset and can be used to exercise the full query pipeline immediately,
+     * without the cost of loading or clustering a real dataset.
+     *
+     * The value range [valMin, valMax] must satisfy valMin > 0 (required by
+     * the P-tensor build which divides fine-point coordinates by coarse-point
+     * coordinates).
+     *
+     * @param[in] N       Number of points at the finest mesh level.
+     * @param[in] D       Dimensionality of each point.
+     * @param[in] valMin  Lower bound of the generated value range (must be > 0).
+     * @param[in] valMax  Upper bound of the generated value range.
+     * @param[in] isInt   When true, all generated coordinates are integers.
+     * @param[in] name    Human-readable label stored in IndexData for logging.
+     * @param[in] height  Total number of mesh levels.
+     * @param[in] ratios  Coarsening ratio per level; length must equal height - 1.
+     * @return Heap-allocated IndexData. Caller owns.
+     */
+    static IndexData* buildRandom(size_t N, size_t D, double valMin, double valMax, bool isInt,
+                                  const std::string& name    = "random",
+                                  size_t             height  = kDefaultHeight,
+                                  const std::vector<size_t>& ratios = kDefaultRatios);
+
 private:
     /*!
      * @brief Compute the number of centroids for a given data count and ratio.
