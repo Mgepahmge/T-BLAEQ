@@ -113,7 +113,7 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
 
     const bool isRange = (queryData.type == QueryType::RANGE);
     const bool isKnn = (queryData.type == QueryType::POINT);
-    const int count = std::min(cfg.maxQueryCount, queryData.length);
+    int count = std::min(cfg.maxQueryCount, queryData.length);
 
     if (cfg.saveFineMesh) {
         result.fineMesh.reserve(count);
@@ -128,6 +128,8 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
         std::cout << "KNN K=" << cfg.K << "\n";
     }
 
+    long maxUs = std::numeric_limits<long>::min();
+    long minUs = std::numeric_limits<long>::max();
     for (int i = 0; i < count; ++i) {
         std::cout << "Query " << i << "\n";
 
@@ -153,6 +155,12 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
         const auto t1 = std::chrono::steady_clock::now();
 
         const long us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+        if (us > maxUs) {
+            maxUs = us;
+        }
+        if (us < minUs) {
+            minUs = us;
+        }
         totalUs += us;
         std::cout << "  -> " << (us / 1000.0) << " ms\n";
 
@@ -180,6 +188,12 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
                 freeDeviceSparseGrid(finalResult.grid, finalResult.ownsIds, finalResult.ownsVals);
             }
         }
+    }
+
+    if (count > 2) {
+        totalUs = totalUs - maxUs;
+        totalUs = totalUs - minUs;
+        count = count - 2;
     }
 
     result.totalTimeUs = totalUs;
