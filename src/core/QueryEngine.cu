@@ -115,6 +115,13 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
     const bool isKnn = (queryData.type == QueryType::POINT);
     int count = std::min(cfg.maxQueryCount, queryData.length);
 
+    if (isKnn) {
+        result.queryParam = "K=" + std::to_string(cfg.K);
+    }
+    if (isRange) {
+        result.queryParam = queryData.queryRangeInfo;
+    }
+
     if (cfg.saveFineMesh) {
         result.fineMesh.reserve(count);
     }

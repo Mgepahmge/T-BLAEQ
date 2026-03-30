@@ -23,6 +23,7 @@ QueryHandler::QueryHandler(const bool forceUseCPU, const std::string& datasetPat
     const auto t0 = std::chrono::steady_clock::now();
     idx_.reset(IndexBuilder::build(dataset.data, static_cast<size_t>(dataset.size), static_cast<size_t>(dataset.dim),
                                    name, forceUseCPU, height, ratios));
+    idx_->datasetName = extractDatasetName(datasetPath);
     const auto t1 = std::chrono::steady_clock::now();
     Chrono::printElapsed("Index build total", t0, t1);
 }
@@ -43,6 +44,7 @@ QueryHandler::QueryHandler(size_t N, size_t D, double valMin, double valMax, boo
 
     const auto t0 = std::chrono::steady_clock::now();
     idx_.reset(IndexBuilder::buildRandom(N, D, valMin, valMax, isInt, name, height, ratios, seed, sigmaDivisor));
+    idx_->datasetName = "Gen" + std::to_string(N) + "D" + std::to_string(D);
     const auto t1 = std::chrono::steady_clock::now();
     Chrono::printElapsed("Index build total", t0, t1);
 }
@@ -55,6 +57,7 @@ QueryHandler::QueryHandler(const std::string& indexPath, bool loadFromIndex) {
     std::cout << "T-BLAEQ: loading index from " << indexPath << "\n";
     const auto t0 = std::chrono::steady_clock::now();
     idx_.reset(IndexSerializer::load(indexPath));
+    idx_->datasetName = extractDatasetName(indexPath);
     const auto t1 = std::chrono::steady_clock::now();
     Chrono::printElapsed("Index load", t0, t1);
 }

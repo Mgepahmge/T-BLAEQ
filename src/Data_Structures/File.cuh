@@ -55,6 +55,7 @@ public:
     int dim = 0; //!< Dimensionality of each query.
     QueryType type = QueryType::POINT; //!< POINT or RANGE.
     std::vector<double> data; //!< Flat storage for all query values.
+    std::string queryRangeInfo; //!< Query range information.
 
     /*!
      * @brief Construct an empty query batch and allocate storage.

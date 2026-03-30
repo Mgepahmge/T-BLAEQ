@@ -3,6 +3,8 @@
 #include <stdexcept>
 #include "File.cuh"
 
+#include "src/utils/Utils.cuh"
+
 PointCloud loadFromFile(const std::string& filename) {
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -207,7 +209,11 @@ static Query loadQueryFromFile(const std::string& filename, QueryType expectedTy
 
 Query loadQueryPointFromFile(const std::string& filename) { return loadQueryFromFile(filename, QueryType::POINT); }
 
-Query loadQueryRangeFromFile(const std::string& filename) { return loadQueryFromFile(filename, QueryType::RANGE); }
+Query loadQueryRangeFromFile(const std::string& filename) {
+    auto query = loadQueryFromFile(filename, QueryType::RANGE);
+    query.queryRangeInfo = extractRangeInfo(filename);
+    return query;
+}
 
 static void saveQueryToFile(const Query& q, const std::string& filename) {
     std::ofstream file(filename);
