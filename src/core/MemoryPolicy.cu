@@ -267,13 +267,25 @@ void PolicyScheduler::printReport(const IndexData& idx, const IndexPolicy& polic
 
 std::unique_ptr<IQueryStrategy> PolicyScheduler::make(IndexData& idx, const IndexPolicy& policy) {
     idx.activePolicy = policy;
-    // When all levels share the same policy, return that single strategy type.
-    // Mixed-policy IndexData is fully supported: QueryEngine calls makeForLevel()
-    // per level, but the "make" entry point is used by QueryHandler which creates
-    // one representative strategy for the prepare() call.
-    // For a mixed policy, use the finest (last) level's policy as representative,
-    // since that level dominates memory usage.
-    const LevelPolicy rep = policy.levels.empty() ? LevelPolicy::L1 : policy.levels.back();
+    // For a mixed-policy index, the representative strategy used for prepare()
+    // must satisfy the requirements of every level.  Specifically:
+    //   - L0 requires uploadPermanentData() + allocSpTSpMBuffers() + allocL0WorkBuffers()
+    //   - L1 requires uploadPermanentData() + all P vals + radius
+    //   - L2 requires uploadPermanentData() (maps + coarsestMesh only)
+    //   - L3 requires nothing (no uploadPermanentData())
+    //
+    // When levels are mixed, we pick the most demanding policy present so that
+    // prepare() uploads everything the coarser (more aggressive) levels need.
+    // Priority: L0 > L1 > L2 > L3.
+    LevelPolicy rep = LevelPolicy::L3;
+    for (const auto lp : policy.levels) {
+        if (static_cast<int>(lp) < static_cast<int>(rep)) {
+            rep = lp;
+        }
+    }
+    if (policy.levels.empty()) {
+        rep = LevelPolicy::L1;
+    }
     switch (rep) {
     case LevelPolicy::L0:
         return std::make_unique<L0Strategy>(idx);

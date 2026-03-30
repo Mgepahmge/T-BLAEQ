@@ -26,10 +26,15 @@ void L0Strategy::prepare(std::ostream& reportOs) {
     PolicyScheduler::printReport(idx_, idx_.activePolicy, reportOs);
     idx_.uploadPermanentData();
 
-    // Upload P vals and radius permanently for all L0 levels
+    // Upload P vals and radius permanently only for levels assigned L0.
+    // In a mixed-policy index, L1/L2/L3 levels manage their own data in
+    // runLevel() and must not have their buffers pre-filled here.
     idx_.dPTensorVals.resize(idx_.intervals);
     idx_.dMeshMaxRadius.resize(idx_.intervals);
     for (size_t l = 0; l < idx_.intervals; ++l) {
+        if (idx_.activePolicy.levels[l] != LevelPolicy::L0) {
+            continue;
+        }
         const size_t vLen = idx_.pTensors[l]->get_nnz_nums() * idx_.pTensors[l]->get_dim();
         idx_.dPTensorVals[l].reset(idx_.pTensors[l]->get_vals(), vLen);
         const size_t rLen = idx_.meshSizes[idx_.intervals - l];
