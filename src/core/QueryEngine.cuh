@@ -45,6 +45,7 @@ struct QueryResult {
 
     std::string datasetName; //!< Name of the dataset used.
     std::string queryParam; //!< Human-readable query parameter string.
+    std::string memoryPolicy; //!< Memory policy per level.
     size_t datasetSize = 0; //!< Number of points in the dataset.
     size_t datasetDim = 0; //!< Dimensionality of the dataset.
 

@@ -209,6 +209,29 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
     const double avgMs = count > 0 ? static_cast<double>(totalUs) / count / 1000.0 : 0.0;
     std::cout << "Average: " << avgMs << " ms\n"
               << "Total:   " << (totalUs / 1000.0) << " ms\n";
+
+    for (size_t l = 0; l < idx.intervals; ++l) {
+        if (l > 0) {
+            result.memoryPolicy += "-";
+        }
+        switch (idx.activePolicy[l]) {
+        case LevelPolicy::L0:
+            result.memoryPolicy += "L0";
+            break;
+        case LevelPolicy::L1:
+            result.memoryPolicy += "L1";
+            break;
+        case LevelPolicy::L2:
+            result.memoryPolicy += "L2";
+            break;
+        case LevelPolicy::L3:
+            result.memoryPolicy += "L3";
+            break;
+        default:
+            result.memoryPolicy += "Unknown";
+        }
+    }
+
     return result;
 }
 
@@ -227,7 +250,7 @@ void saveQueryResult(const QueryResult& result, const std::string& outputFile) {
 
     if (!exists) {
         out << "Dataset,Size,Dim,Query Type,Query Parameter,"
-               "Query Count,Total Time (ms),Avg Time (ms),"
+               "Query Count,Total Time (ms),Avg Time (ms),Memory Policy,"
                "Median Log Volume,Avg Range Volume,Avg Fine Mesh\n";
     }
 
@@ -260,7 +283,7 @@ void saveQueryResult(const QueryResult& result, const std::string& outputFile) {
     out << result.datasetName << ',' << result.datasetSize << ',' << result.datasetDim << ','
         << ((result.type == QueryType::POINT) ? "POINT (KNN)" : "RANGE") << ',' << result.queryParam << ','
         << result.queryCount << ',' << std::fixed << std::setprecision(3) << totalMs << ',' << std::fixed
-        << std::setprecision(6) << avgMs << ',' << medStr << ',' << fmtStr << ',' << avgFineStr << '\n';
+        << std::setprecision(6) << avgMs << ',' << result.memoryPolicy << ',' << medStr << ',' << fmtStr << ',' << avgFineStr << '\n';
 
     std::cout << "Result saved to: " << outputFile << "\n";
 }
