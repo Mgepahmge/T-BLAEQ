@@ -142,3 +142,33 @@ QueryResult QueryHandler::performQuery(const std::string& queryPath, QueryType q
 
     return QueryEngine::run(*idx_, *strategy_, queryData, cfg);
 }
+
+QueryResult QueryHandler::performSingleKNNQuery(const std::vector<double>& queryPoint, size_t k, bool saveFineMesh) {
+    ensurePrepared();
+
+    Query queryData(1, static_cast<int>(idx_->D), QueryType::POINT);
+    queryData.setQueryPoint(0, queryPoint);
+
+    QueryEngine::RunConfig cfg;
+    cfg.saveFineMesh = saveFineMesh;
+    cfg.maxQueryCount = 1;
+    cfg.K = k;
+
+    return QueryEngine::run(*idx_, *strategy_, queryData, cfg);
+}
+
+QueryResult QueryHandler::performSingleRangeQuery(const std::vector<double>& queryUpperBound,
+                                                  const std::vector<double>& queryLowerBound,
+                                                  bool saveFineMesh) {
+    ensurePrepared();
+
+    Query queryData(1, static_cast<int>(idx_->D), QueryType::RANGE);
+    queryData.setQueryRange(0, queryLowerBound, queryUpperBound);
+    queryData.queryRangeInfo = "single-range-query";
+
+    QueryEngine::RunConfig cfg;
+    cfg.saveFineMesh = saveFineMesh;
+    cfg.maxQueryCount = 1;
+
+    return QueryEngine::run(*idx_, *strategy_, queryData, cfg);
+}

@@ -176,6 +176,32 @@ public:
                              int maxQueryCount = std::numeric_limits<int>::max(), size_t K = 0);
 
     /*!
+     * @brief Execute a single in-memory KNN query point.
+     *
+     * @details Calls ensurePrepared(), wraps the provided point into a one-item
+     * POINT query batch, and executes it via QueryEngine::run().
+     *
+     * @param[in] queryPoint    Query point coordinates (size must equal getDim()).
+     * @param[in] k             Number of nearest neighbours.
+     * @param[in] saveFineMesh  When true, retain the fine-mesh SparseGrid in the result.
+     * @return QueryResult containing exactly one executed query on success.
+     */
+    QueryResult performSingleKNNQuery(const std::vector<double>& queryPoint, size_t k, bool saveFineMesh = false);
+
+    /*!
+     * @brief Execute a single in-memory axis-aligned range query.
+     *
+     * @details Calls ensurePrepared(), wraps the provided bounds into a one-item
+     * RANGE query batch, and executes it via QueryEngine::run().
+     *
+     * @param[in] queryUpperBound Upper bounds of the query box (size must equal getDim()).
+     * @param[in] queryLowerBound Lower bounds of the query box (size must equal getDim()).
+     * @param[in] saveFineMesh    When true, retain the fine-mesh SparseGrid in the result.
+     * @return QueryResult containing exactly one executed query on success.
+     */
+    QueryResult performSingleRangeQuery(const std::vector<double>& queryUpperBound, const std::vector<double>& queryLowerBound, bool saveFineMesh = false);
+
+    /*!
      * @brief Return the number of data points in the index.
      * @return Total point count N.
      */
