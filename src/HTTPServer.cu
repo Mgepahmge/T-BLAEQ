@@ -1,0 +1,416 @@
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <filesystem>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <regex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include "CLI11.hpp"
+#include "core/QueryHandler.cuh"
+#include "cuda_runtime.h"
+#include "httplib.h"
+#include "picojson.h"
+
+namespace fs = std::filesystem;
+
+namespace {
+
+constexpr const char* kDefaultHost = "0.0.0.0";
+constexpr int kDefaultPort = 8080;
+constexpr const char* kDefaultIndexCacheDir = "./tempIndexCache";
+
+std::string processIndexPath(const std::string& datasetName, const std::string& basePath) {
+    return (fs::path(basePath) / datasetName).string();
+}
+
+bool isValidDatasetName(const std::string& datasetName) {
+    static const std::regex kDatasetNamePattern("^[A-Za-z0-9._-]+$");
+    return !datasetName.empty() && std::regex_match(datasetName, kDatasetNamePattern);
+}
+
+bool indexExists(const std::string& datasetName, const std::string& basePath) {
+    const fs::path indexDir = processIndexPath(datasetName, basePath);
+    return fs::exists(indexDir / "metadata.bin");
+}
+
+std::vector<std::string> listIndexedDatasets(const std::string& basePath) {
+    std::vector<std::string> datasets;
+    const fs::path base(basePath);
+    if (!fs::exists(base) || !fs::is_directory(base)) {
+        return datasets;
+    }
+
+    for (const auto& entry : fs::directory_iterator(base)) {
+        if (!entry.is_directory()) {
+            continue;
+        }
+        const fs::path metadata = entry.path() / "metadata.bin";
+        if (fs::exists(metadata)) {
+            datasets.push_back(entry.path().filename().string());
+        }
+    }
+    std::sort(datasets.begin(), datasets.end());
+    return datasets;
+}
+
+void setJsonResponse(httplib::Response& res, const picojson::object& body, int statusCode = 200) {
+    res.status = statusCode;
+    res.set_header("Content-Type", "application/json");
+    res.set_content(picojson::value(body).serialize(), "application/json");
+}
+
+void sendError(httplib::Response& res, int statusCode, const std::string& message) {
+    picojson::object body;
+    body["success"] = picojson::value(false);
+    body["message"] = picojson::value(message);
+    setJsonResponse(res, body, statusCode);
+}
+
+bool parseRequestJson(const httplib::Request& req, httplib::Response& res, picojson::object& out) {
+    picojson::value parsed;
+    const std::string err = picojson::parse(parsed, req.body);
+    if (!err.empty()) {
+        sendError(res, 400, "Invalid JSON: " + err);
+        return false;
+    }
+    if (!parsed.is<picojson::object>()) {
+        sendError(res, 400, "Request body must be a JSON object");
+        return false;
+    }
+    out = parsed.get<picojson::object>();
+    return true;
+}
+
+bool requireString(const picojson::object& obj, const std::string& field, std::string& out) {
+    const auto it = obj.find(field);
+    if (it == obj.end() || !it->second.is<std::string>()) {
+        return false;
+    }
+    out = it->second.get<std::string>();
+    return true;
+}
+
+bool optionalBool(const picojson::object& obj, const std::string& field, bool& out) {
+    const auto it = obj.find(field);
+    if (it == obj.end()) {
+        return true;
+    }
+    if (!it->second.is<bool>()) {
+        return false;
+    }
+    out = it->second.get<bool>();
+    return true;
+}
+
+bool optionalPositiveInteger(const picojson::object& obj, const std::string& field, size_t& out) {
+    const auto it = obj.find(field);
+    if (it == obj.end()) {
+        return true;
+    }
+    if (!it->second.is<double>()) {
+        return false;
+    }
+    const double value = it->second.get<double>();
+    if (value <= 0 || std::floor(value) != value) {
+        return false;
+    }
+    out = static_cast<size_t>(value);
+    return true;
+}
+
+bool parseNumericVector(const picojson::value& value, std::vector<double>& out) {
+    if (!value.is<picojson::array>()) {
+        return false;
+    }
+    const auto& arr = value.get<picojson::array>();
+    out.clear();
+    out.reserve(arr.size());
+    for (const auto& elem : arr) {
+        if (!elem.is<double>()) {
+            return false;
+        }
+        out.push_back(elem.get<double>());
+    }
+    return true;
+}
+
+std::vector<size_t> extractResult(const QueryResult& queryResult) {
+    if (queryResult.queryCount != 1 || queryResult.fineMesh.empty() || queryResult.fineMeshOnHost.empty()) {
+        throw std::runtime_error("Query result is invalid. Ensure exactly one query and saveFineMesh=true.");
+    }
+    const auto& fineMesh = *queryResult.fineMesh[0];
+    const size_t size = fineMesh.get_nnz_nums();
+    std::vector<size_t> result(size);
+    if (!fineMesh.get_ids_()) {
+        return result;
+    }
+    if (queryResult.fineMeshOnHost[0]) {
+        std::copy_n(fineMesh.get_ids_(), size, result.begin());
+        return result;
+    }
+    const cudaError_t err = cudaMemcpy(result.data(), fineMesh.get_ids_(), size * sizeof(size_t), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaMemcpy failed: ") + cudaGetErrorString(err));
+    }
+    return result;
+}
+
+class IndexManager {
+public:
+    explicit IndexManager(std::string basePath) : basePath_(std::move(basePath)) {}
+
+    bool existsOnDisk(const std::string& datasetName) const {
+        return indexExists(datasetName, basePath_);
+    }
+
+    std::vector<std::string> listDatasets() const {
+        return listIndexedDatasets(basePath_);
+    }
+
+    void buildAndSave(const std::string& datasetName, const std::string& datasetPath, bool forceCPU) {
+        auto handler = std::make_unique<QueryHandler>(forceCPU, datasetPath);
+        handler->saveIndex(processIndexPath(datasetName, basePath_));
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        handlers_[datasetName] = std::move(handler);
+    }
+
+    QueryHandler& getOrLoad(const std::string& datasetName) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = handlers_.find(datasetName);
+        if (it != handlers_.end()) {
+            return *it->second;
+        }
+
+        if (!existsOnDisk(datasetName)) {
+            throw std::runtime_error("Dataset index does not exist: " + datasetName);
+        }
+        auto handler = std::make_unique<QueryHandler>(processIndexPath(datasetName, basePath_), true);
+        handler->prepareForQuery();
+        QueryHandler& ref = *handler;
+        handlers_[datasetName] = std::move(handler);
+        return ref;
+    }
+
+private:
+    std::string basePath_;
+    std::unordered_map<std::string, std::unique_ptr<QueryHandler>> handlers_;
+    mutable std::mutex mutex_;
+};
+
+void setupRoutes(httplib::Server& server, IndexManager& manager) {
+    server.Post("/build-index", [&manager](const httplib::Request& req, httplib::Response& res) {
+        picojson::object body;
+        if (!parseRequestJson(req, res, body)) {
+            return;
+        }
+
+        std::string datasetName;
+        if (!requireString(body, "dataset_name", datasetName)) {
+            sendError(res, 400, "Field 'dataset_name' is required and must be a string");
+            return;
+        }
+        if (!isValidDatasetName(datasetName)) {
+            sendError(res, 400, "Invalid dataset_name. Allowed: [A-Za-z0-9._-], non-empty");
+            return;
+        }
+
+        if (manager.existsOnDisk(datasetName)) {
+            picojson::object ok;
+            ok["success"] = picojson::value(true);
+            ok["dataset_name"] = picojson::value(datasetName);
+            ok["already_exists"] = picojson::value(true);
+            ok["message"] = picojson::value("Index already exists");
+            setJsonResponse(res, ok);
+            return;
+        }
+
+        std::string datasetPath;
+        if (!requireString(body, "dataset_path", datasetPath) || datasetPath.empty()) {
+            sendError(res, 400, "Field 'dataset_path' is required and cannot be empty when index does not exist");
+            return;
+        }
+        if (!fs::exists(datasetPath) || !fs::is_regular_file(datasetPath)) {
+            sendError(res, 400, "dataset_path does not exist or is not a file");
+            return;
+        }
+
+        bool forceCPU = false;
+        if (!optionalBool(body, "force_cpu", forceCPU)) {
+            sendError(res, 400, "Field 'force_cpu' must be a boolean");
+            return;
+        }
+
+        try {
+            manager.buildAndSave(datasetName, datasetPath, forceCPU);
+            picojson::object ok;
+            ok["success"] = picojson::value(true);
+            ok["dataset_name"] = picojson::value(datasetName);
+            ok["already_exists"] = picojson::value(false);
+            ok["message"] = picojson::value("Index build and save succeeded");
+            setJsonResponse(res, ok);
+        } catch (const std::exception& e) {
+            sendError(res, 500, std::string("Failed to build index: ") + e.what());
+        }
+    });
+
+    auto listHandler = [&manager](const httplib::Request&, httplib::Response& res) {
+        picojson::array datasetsJson;
+        for (const auto& name : manager.listDatasets()) {
+            datasetsJson.emplace_back(name);
+        }
+        picojson::object body;
+        body["success"] = picojson::value(true);
+        body["datasets"] = picojson::value(datasetsJson);
+        setJsonResponse(res, body);
+    };
+    server.Get("/datasets", listHandler);
+    server.Post("/datasets", listHandler);
+
+    server.Post("/query", [&manager](const httplib::Request& req, httplib::Response& res) {
+        picojson::object body;
+        if (!parseRequestJson(req, res, body)) {
+            return;
+        }
+
+        std::string datasetName;
+        if (!requireString(body, "dataset_name", datasetName)) {
+            sendError(res, 400, "Field 'dataset_name' is required and must be a string");
+            return;
+        }
+        if (!isValidDatasetName(datasetName)) {
+            sendError(res, 400, "Invalid dataset_name. Allowed: [A-Za-z0-9._-], non-empty");
+            return;
+        }
+
+        std::string queryTypeStr;
+        if (!requireString(body, "query_type", queryTypeStr)) {
+            sendError(res, 400, "Field 'query_type' is required and must be 'KNN' or 'RANGE'");
+            return;
+        }
+        for (char& c : queryTypeStr) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        if (queryTypeStr != "KNN" && queryTypeStr != "RANGE") {
+            sendError(res, 400, "query_type must be 'KNN' or 'RANGE'");
+            return;
+        }
+
+        QueryHandler* handler = nullptr;
+        try {
+            handler = &manager.getOrLoad(datasetName);
+        } catch (const std::exception& e) {
+            sendError(res, 400, e.what());
+            return;
+        }
+
+        const size_t dim = handler->getDim();
+        std::vector<size_t> resultIds;
+
+        try {
+            if (queryTypeStr == "KNN") {
+                const auto it = body.find("query_point");
+                if (it == body.end()) {
+                    sendError(res, 400, "Field 'query_point' is required for KNN query");
+                    return;
+                }
+                std::vector<double> point;
+                if (!parseNumericVector(it->second, point)) {
+                    sendError(res, 400, "Field 'query_point' must be a numeric array");
+                    return;
+                }
+                if (point.size() != dim) {
+                    sendError(res, 400, "query_point dimension mismatch: expected " + std::to_string(dim));
+                    return;
+                }
+
+                size_t k = 10;
+                if (!optionalPositiveInteger(body, "k", k)) {
+                    sendError(res, 400, "Field 'k' must be a positive integer");
+                    return;
+                }
+                const QueryResult qr = handler->performSingleKNNQuery(point, k, true);
+                resultIds = extractResult(qr);
+            } else {
+                const auto upperIt = body.find("upper_bound");
+                const auto lowerIt = body.find("lower_bound");
+                if (upperIt == body.end() || lowerIt == body.end()) {
+                    sendError(res, 400, "Fields 'upper_bound' and 'lower_bound' are required for RANGE query");
+                    return;
+                }
+
+                std::vector<double> upperBound;
+                std::vector<double> lowerBound;
+                if (!parseNumericVector(upperIt->second, upperBound) || !parseNumericVector(lowerIt->second, lowerBound)) {
+                    sendError(res, 400, "upper_bound and lower_bound must be numeric arrays");
+                    return;
+                }
+                if (upperBound.size() != dim || lowerBound.size() != dim) {
+                    sendError(res, 400, "Range bound dimension mismatch: expected " + std::to_string(dim));
+                    return;
+                }
+                for (size_t i = 0; i < dim; ++i) {
+                    if (lowerBound[i] > upperBound[i]) {
+                        sendError(res, 400, "Invalid range: lower_bound[" + std::to_string(i) + "] > upper_bound[" + std::to_string(i) + "]");
+                        return;
+                    }
+                }
+
+                const QueryResult qr = handler->performSingleRangeQuery(upperBound, lowerBound, true);
+                resultIds = extractResult(qr);
+            }
+        } catch (const std::exception& e) {
+            sendError(res, 500, std::string("Query execution failed: ") + e.what());
+            return;
+        }
+
+        picojson::array resultJson;
+        resultJson.reserve(resultIds.size());
+        for (const size_t id : resultIds) {
+            resultJson.emplace_back(static_cast<double>(id));
+        }
+
+        picojson::object ok;
+        ok["success"] = picojson::value(true);
+        ok["dataset_name"] = picojson::value(datasetName);
+        ok["query_type"] = picojson::value(queryTypeStr);
+        ok["result"] = picojson::value(resultJson);
+        setJsonResponse(res, ok);
+    });
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    std::string host = kDefaultHost;
+    int port = kDefaultPort;
+    std::string indexCacheDir = kDefaultIndexCacheDir;
+
+    CLI::App app{"T-BLAEQ HTTP server"};
+    app.add_option("-p,--port", port, "HTTP listen port (default: 8080)");
+    app.add_option("-i,--index-cache", indexCacheDir, "Index cache directory (default: ./tempIndexCache)");
+    app.add_option("-H,--host", host, "HTTP listen host (default: 0.0.0.0)");
+    CLI11_PARSE(app, argc, argv);
+
+    if (port <= 0 || port > 65535) {
+        throw std::runtime_error("Invalid port. Must be in range (0, 65535].");
+    }
+
+    fs::create_directories(indexCacheDir);
+
+    IndexManager manager(indexCacheDir);
+    httplib::Server server;
+    setupRoutes(server, manager);
+
+    std::cout << "T-BLAEQ HTTP server listening on " << host << ":" << port
+              << ", index cache path: " << indexCacheDir << "\n";
+
+    if (!server.listen(host, port)) {
+        throw std::runtime_error("Failed to start HTTP server.");
+    }
+    return 0;
+}

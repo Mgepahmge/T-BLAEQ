@@ -25,5 +25,26 @@ Repository: https://github.com/rapidsai/cuvs
 
 ================================================================================
 
+cpp-httplib
+-----------
+Copyright (c) 2017 yhirose
+
+License: MIT
+License Location: THIRD_PARTY_LICENSES/httplibLICENSE
+Repository: https://github.com/yhirose/cpp-httplib
+
+================================================================================
+
+picojson
+--------
+Copyright 2009-2010 Cybozu Labs, Inc.
+Copyright 2011-2014 Kazuho Oku
+
+License: BSD-2-Clause
+License Location: THIRD_PARTY_LICENSES/picojsonLICENSE.
+Repository: https://github.com/kazuho/picojson
+
+================================================================================
+
 For full license texts, please refer to the files in the THIRD_PARTY_LICENSES
 directory.
