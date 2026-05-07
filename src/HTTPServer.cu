@@ -1,3 +1,62 @@
+/**
+ * @file HTTPServer.cu
+ * @brief HTTP+JSON service layer for index building and online query execution.
+ *
+ * @details This executable exposes T-BLAEQ over HTTP using cpp-httplib and picojson.
+ * It provides three endpoints:
+ *
+ * 1) POST /build-index
+ *    Input JSON:
+ *      - dataset_name (string, required)
+ *      - dataset_path (string, required when index does not exist; may be omitted only
+ *        when the named index already exists)
+ *      - force_cpu (bool, optional, default false)
+ *
+ *    Output JSON (success):
+ *      - success (true)
+ *      - dataset_name (string)
+ *      - already_exists (bool)
+ *      - message (string)
+ *
+ *    Output JSON (failure):
+ *      - success (false)
+ *      - message (string)
+ *
+ * 2) GET/POST /datasets
+ *    Input: none
+ *    Output JSON (success):
+ *      - success (true)
+ *      - datasets (array<string>): names of all datasets whose index directory
+ *        contains metadata.bin
+ *
+ * 3) POST /query
+ *    Input JSON:
+ *      - dataset_name (string, required)
+ *      - query_type (string, required: "KNN" or "RANGE", case-insensitive)
+ *      - KNN mode:
+ *          - query_point (array<number>, required, length == dataset dimension)
+ *          - k (positive integer, optional, default 10)
+ *      - RANGE mode:
+ *          - upper_bound (array<number>, required, length == dataset dimension)
+ *          - lower_bound (array<number>, required, length == dataset dimension)
+ *          - requires lower_bound[i] <= upper_bound[i] for all i
+ *
+ *    Output JSON (success):
+ *      - success (true)
+ *      - dataset_name (string)
+ *      - query_type (string)
+ *      - result (array<number>): fine-mesh point ids (extractResult output)
+ *
+ *    Output JSON (failure):
+ *      - success (false)
+ *      - message (string)
+ *
+ * Validation policy:
+ *   - All request bodies must be JSON objects.
+ *   - Required fields must exist and have correct types.
+ *   - Dataset names are restricted to [A-Za-z0-9._-].
+ *   - Vector dimensions are validated against index dimensionality.
+ */
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -161,16 +220,35 @@ std::vector<size_t> extractResult(const QueryResult& queryResult) {
 
 class IndexManager {
 public:
+    /*!
+     * @brief Create an index manager rooted at the given cache directory.
+     * @param basePath Root directory that stores one index subdirectory per dataset.
+     */
     explicit IndexManager(std::string basePath) : basePath_(std::move(basePath)) {}
 
+    /*!
+     * @brief Check whether a dataset index is already persisted on disk.
+     * @param datasetName Dataset logical name.
+     * @return True when metadata.bin exists under the dataset index directory.
+     */
     bool existsOnDisk(const std::string& datasetName) const {
         return indexExists(datasetName, basePath_);
     }
 
+    /*!
+     * @brief List all dataset names that currently have persisted indexes.
+     * @return Sorted list of dataset names.
+     */
     std::vector<std::string> listDatasets() const {
         return listIndexedDatasets(basePath_);
     }
 
+    /*!
+     * @brief Build an index from dataset file and persist it under datasetName.
+     * @param datasetName Target dataset name (directory name under cache root).
+     * @param datasetPath Input dataset file path.
+     * @param forceCPU Whether to force CPU index building.
+     */
     void buildAndSave(const std::string& datasetName, const std::string& datasetPath, bool forceCPU) {
         auto handler = std::make_unique<QueryHandler>(forceCPU, datasetPath);
         handler->saveIndex(processIndexPath(datasetName, basePath_));
@@ -202,6 +280,49 @@ private:
     mutable std::mutex mutex_;
 };
 
+/*!
+ * @brief Register all HTTP routes for index build/list/query services.
+ *
+ * @details Endpoint I/O contract:
+ *
+ * - POST /build-index
+ *   Request:
+ *   @code{.json}
+ *   {"dataset_name":"sift","dataset_path":"/data/sift.txt","force_cpu":false}
+ *   @endcode
+ *   Success response:
+ *   @code{.json}
+ *   {"success":true,"dataset_name":"sift","already_exists":false,"message":"Index build and save succeeded"}
+ *   @endcode
+ *
+ * - GET /datasets (or POST /datasets)
+ *   Success response:
+ *   @code{.json}
+ *   {"success":true,"datasets":["sift","gist"]}
+ *   @endcode
+ *
+ * - POST /query
+ *   KNN request:
+ *   @code{.json}
+ *   {"dataset_name":"sift","query_type":"KNN","query_point":[1.0,2.0,3.0],"k":10}
+ *   @endcode
+ *   RANGE request:
+ *   @code{.json}
+ *   {"dataset_name":"sift","query_type":"RANGE","lower_bound":[0.0,0.0,0.0],"upper_bound":[5.0,5.0,5.0]}
+ *   @endcode
+ *   Success response:
+ *   @code{.json}
+ *   {"success":true,"dataset_name":"sift","query_type":"KNN","result":[12,45,98]}
+ *   @endcode
+ *
+ * All failures use:
+ * @code{.json}
+ * {"success":false,"message":"..."}
+ * @endcode
+ *
+ * @param server cpp-httplib server instance.
+ * @param manager Index manager used by route handlers.
+ */
 void setupRoutes(httplib::Server& server, IndexManager& manager) {
     server.Post("/build-index", [&manager](const httplib::Request& req, httplib::Response& res) {
         picojson::object body;
@@ -385,6 +506,18 @@ void setupRoutes(httplib::Server& server, IndexManager& manager) {
 
 } // namespace
 
+/*!
+ * @brief Entry point of the HTTP server executable.
+ *
+ * @details Command line options:
+ * - --port, -p: listen port (default: 8080)
+ * - --index-cache, -i: index cache root path (default: ./tempIndexCache)
+ * - --host, -H: bind host (default: 0.0.0.0)
+ *
+ * @param argc Argument count.
+ * @param argv Argument vector.
+ * @return 0 on normal shutdown.
+ */
 int main(int argc, char** argv) {
     std::string host = kDefaultHost;
     int port = kDefaultPort;
