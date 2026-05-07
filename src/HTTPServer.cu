@@ -26,6 +26,7 @@
  *    Input: none
  *    Output JSON (success):
  *      - success (true)
+ *      - datasets_count (number): length of datasets array
  *      - datasets (array<string>): names of all datasets whose index directory
  *        contains metadata.bin
  *
@@ -45,6 +46,7 @@
  *      - success (true)
  *      - dataset_name (string)
  *      - query_type (string)
+ *      - result_count (number): length of result array
  *      - result (array<number>): fine-mesh point ids (extractResult output)
  *
  *    Output JSON (failure):
@@ -298,7 +300,7 @@ private:
  * - GET /datasets (or POST /datasets)
  *   Success response:
  *   @code{.json}
- *   {"success":true,"datasets":["sift","gist"]}
+ *   {"success":true,"datasets_count":2,"datasets":["sift","gist"]}
  *   @endcode
  *
  * - POST /query
@@ -312,7 +314,7 @@ private:
  *   @endcode
  *   Success response:
  *   @code{.json}
- *   {"success":true,"dataset_name":"sift","query_type":"KNN","result":[12,45,98]}
+ *   {"success":true,"dataset_name":"sift","query_type":"KNN","result_count":3,"result":[12,45,98]}
  *   @endcode
  *
  * All failures use:
@@ -380,12 +382,15 @@ void setupRoutes(httplib::Server& server, IndexManager& manager) {
     });
 
     auto listHandler = [&manager](const httplib::Request&, httplib::Response& res) {
+        const std::vector<std::string> datasets = manager.listDatasets();
         picojson::array datasetsJson;
-        for (const auto& name : manager.listDatasets()) {
+        datasetsJson.reserve(datasets.size());
+        for (const auto& name : datasets) {
             datasetsJson.emplace_back(name);
         }
         picojson::object body;
         body["success"] = picojson::value(true);
+        body["datasets_count"] = picojson::value(static_cast<double>(datasets.size()));
         body["datasets"] = picojson::value(datasetsJson);
         setJsonResponse(res, body);
     };
@@ -499,6 +504,7 @@ void setupRoutes(httplib::Server& server, IndexManager& manager) {
         ok["success"] = picojson::value(true);
         ok["dataset_name"] = picojson::value(datasetName);
         ok["query_type"] = picojson::value(queryTypeStr);
+        ok["result_count"] = picojson::value(static_cast<double>(resultIds.size()));
         ok["result"] = picojson::value(resultJson);
         setJsonResponse(res, ok);
     });
