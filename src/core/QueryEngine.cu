@@ -19,6 +19,7 @@
 QueryResult::~QueryResult() {
     for (size_t i = 0; i < fineMesh.size(); ++i) {
         const bool ownsIds = (i < fineMeshOwnsIds.size()) ? fineMeshOwnsIds[i] : true;
+        const bool ownsVals = (i < fineMeshOwnsVals.size()) ? fineMeshOwnsVals[i] : true;
         const bool onHost = (i < fineMeshOnHost.size()) ? fineMeshOnHost[i] : false;
         if (onHost) {
             delete[] fineMesh[i]->get_ids_();
@@ -26,7 +27,6 @@ QueryResult::~QueryResult() {
             delete fineMesh[i];
         }
         else {
-            const bool ownsVals = true; // fineMesh always owns vals (L0 grids not saved)
             freeDeviceSparseGrid(fineMesh[i], ownsIds, ownsVals);
         }
     }
@@ -61,7 +61,8 @@ static std::string formatLogVolume(double lv) {
 }
 
 LevelResult QueryEngine::runSingleQuery(IndexData& idx, QueryType qType, const double* lo, const double* hi,
-                                        const double* queryPoint, size_t K) {
+                                        const double* queryPoint, size_t K,
+                                        size_t* levelFineMeshSize) {
     // L3 does not set permanentDataOnDevice; each strategy enforces its own
     // pre-conditions in runLevel().
 
@@ -76,6 +77,9 @@ LevelResult QueryEngine::runSingleQuery(IndexData& idx, QueryType qType, const d
     for (size_t l = 0; l < idx.intervals; ++l) {
         auto levelStrategy = PolicyScheduler::makeForLevel(idx, l);
         LevelResult result = levelStrategy->runLevel(l, currentGrid, qType, lo, hi, queryPoint, K);
+        if (levelFineMeshSize) {
+            levelFineMeshSize[l] = result.grid->get_nnz_nums();
+        }
 
         // Free the previous level's grid.
         // Each strategy is responsible for handling its own input correctly
@@ -127,6 +131,13 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
     }
     result.queryRangeVolume.reserve(count);
     result.fineMeshSize.reserve(count);
+    result.levelFineMeshSize.reserve(count);
+    result.queryTimeUs.reserve(count);
+    result.levelOriginalSize.reserve(idx.intervals);
+    for (size_t l = 0; l < idx.intervals; ++l) {
+        const size_t levelIdxFromFinest = idx.intervals - (l + 1);
+        result.levelOriginalSize.push_back(levelIdxFromFinest < idx.meshSizes.size() ? idx.meshSizes[levelIdxFromFinest] : 0);
+    }
 
     std::vector<double> lo(idx.D), hi(idx.D), qpt(idx.D);
     long totalUs = 0;
@@ -156,7 +167,9 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
 
         const auto t0 = std::chrono::steady_clock::now();
 
-        LevelResult finalResult = runSingleQuery(idx, queryData.type, lo.data(), hi.data(), qpt.data(), cfg.K);
+        std::vector<size_t> queryLevelFineMeshSize(idx.intervals, 0);
+        LevelResult finalResult =
+            runSingleQuery(idx, queryData.type, lo.data(), hi.data(), qpt.data(), cfg.K, queryLevelFineMeshSize.data());
 
         profiler.release();
         const auto t1 = std::chrono::steady_clock::now();
@@ -171,6 +184,8 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
         totalUs += us;
         std::cout << "  -> " << (us / 1000.0) << " ms\n";
 
+        result.queryTimeUs.push_back(us);
+        result.levelFineMeshSize.push_back(std::move(queryLevelFineMeshSize));
         result.fineMeshSize.push_back(finalResult.grid->get_nnz_nums());
 
         if (isRange) {
@@ -183,6 +198,7 @@ QueryResult QueryEngine::run(IndexData& idx, IQueryStrategy& strategy, const Que
         if (cfg.saveFineMesh) {
             result.fineMesh.push_back(finalResult.grid);
             result.fineMeshOwnsIds.push_back(finalResult.ownsIds);
+            result.fineMeshOwnsVals.push_back(finalResult.ownsVals);
             result.fineMeshOnHost.push_back(finalResult.onHost);
         }
         else {

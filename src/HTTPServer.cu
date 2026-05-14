@@ -48,6 +48,9 @@
  *      - query_type (string)
  *      - result_count (number): length of result array
  *      - result (array<number>): fine-mesh point ids (extractResult output)
+ *      - level_original_sizes (array<number>): each runLevel target layer's original size
+ *      - level_pruned_sizes (array<number>): fineGrid nnz after each runLevel for this query
+ *      - query_runtime (object): query_time_us/query_time_ms/total_time_us/avg_time_us/query_count
  *
  *    Output JSON (failure):
  *      - success (false)
@@ -199,6 +202,15 @@ bool parseNumericVector(const picojson::value& value, std::vector<double>& out) 
     return true;
 }
 
+picojson::array toJsonArray(const std::vector<size_t>& values) {
+    picojson::array json;
+    json.reserve(values.size());
+    for (const size_t v : values) {
+        json.emplace_back(static_cast<double>(v));
+    }
+    return json;
+}
+
 std::vector<size_t> extractResult(const QueryResult& queryResult) {
     if (queryResult.queryCount != 1 || queryResult.fineMesh.empty() || queryResult.fineMeshOnHost.empty()) {
         throw std::runtime_error("Query result is invalid. Ensure exactly one query and saveFineMesh=true.");
@@ -314,7 +326,9 @@ private:
  *   @endcode
  *   Success response:
  *   @code{.json}
- *   {"success":true,"dataset_name":"sift","query_type":"KNN","result_count":3,"result":[12,45,98]}
+ *   {"success":true,"dataset_name":"sift","query_type":"KNN","result_count":3,"result":[12,45,98],
+ *    "level_original_sizes":[1000,20000,1000000],"level_pruned_sizes":[97,1043,3],
+ *    "query_runtime":{"query_time_us":8123,"query_time_ms":8.123,"total_time_us":8123,"avg_time_us":8123.0,"query_count":1}}
  *   @endcode
  *
  * All failures use:
@@ -436,8 +450,30 @@ void setupRoutes(httplib::Server& server, IndexManager& manager) {
 
         const size_t dim = handler->getDim();
         std::vector<size_t> resultIds;
+        std::vector<size_t> levelOriginalSizes;
+        std::vector<size_t> levelPrunedSizes;
+        std::string memoryPolicy;
+        long queryTimeUs = 0;
+        long totalTimeUs = 0;
+        double avgTimeUs = 0.0;
+        size_t queryCount = 0;
 
         try {
+            auto collectQueryResult = [&](const QueryResult& qr) {
+                resultIds = extractResult(qr);
+                levelOriginalSizes = qr.levelOriginalSize;
+                if (!qr.levelFineMeshSize.empty()) {
+                    levelPrunedSizes = qr.levelFineMeshSize[0];
+                }
+                if (!qr.queryTimeUs.empty()) {
+                    queryTimeUs = qr.queryTimeUs[0];
+                }
+                totalTimeUs = qr.totalTimeUs;
+                queryCount = qr.queryCount;
+                avgTimeUs = (queryCount > 0) ? static_cast<double>(totalTimeUs) / static_cast<double>(queryCount) : 0.0;
+                memoryPolicy = qr.memoryPolicy;
+            };
+
             if (queryTypeStr == "KNN") {
                 const auto it = body.find("query_point");
                 if (it == body.end()) {
@@ -460,7 +496,7 @@ void setupRoutes(httplib::Server& server, IndexManager& manager) {
                     return;
                 }
                 const QueryResult qr = handler->performSingleKNNQuery(point, k, true);
-                resultIds = extractResult(qr);
+                collectQueryResult(qr);
             } else {
                 const auto upperIt = body.find("upper_bound");
                 const auto lowerIt = body.find("lower_bound");
@@ -487,18 +523,21 @@ void setupRoutes(httplib::Server& server, IndexManager& manager) {
                 }
 
                 const QueryResult qr = handler->performSingleRangeQuery(upperBound, lowerBound, true);
-                resultIds = extractResult(qr);
+                collectQueryResult(qr);
             }
         } catch (const std::exception& e) {
             sendError(res, 500, std::string("Query execution failed: ") + e.what());
             return;
         }
 
-        picojson::array resultJson;
-        resultJson.reserve(resultIds.size());
-        for (const size_t id : resultIds) {
-            resultJson.emplace_back(static_cast<double>(id));
-        }
+        const picojson::array resultJson = toJsonArray(resultIds);
+
+        picojson::object runtimeJson;
+        runtimeJson["query_time_us"] = picojson::value(static_cast<double>(queryTimeUs));
+        runtimeJson["query_time_ms"] = picojson::value(static_cast<double>(queryTimeUs) / 1000.0);
+        runtimeJson["total_time_us"] = picojson::value(static_cast<double>(totalTimeUs));
+        runtimeJson["avg_time_us"] = picojson::value(avgTimeUs);
+        runtimeJson["query_count"] = picojson::value(static_cast<double>(queryCount));
 
         picojson::object ok;
         ok["success"] = picojson::value(true);
@@ -506,6 +545,10 @@ void setupRoutes(httplib::Server& server, IndexManager& manager) {
         ok["query_type"] = picojson::value(queryTypeStr);
         ok["result_count"] = picojson::value(static_cast<double>(resultIds.size()));
         ok["result"] = picojson::value(resultJson);
+        ok["memory_policy"] = picojson::value(memoryPolicy);
+        ok["level_original_sizes"] = picojson::value(toJsonArray(levelOriginalSizes));
+        ok["level_pruned_sizes"] = picojson::value(toJsonArray(levelPrunedSizes));
+        ok["query_runtime"] = picojson::value(runtimeJson);
         setJsonResponse(res, ok);
     });
 }

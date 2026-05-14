@@ -51,8 +51,12 @@ struct QueryResult {
 
     std::vector<double> queryRangeVolume; //!< Per-query range volume (RANGE queries).
     std::vector<size_t> fineMeshSize; //!< Per-query fine-mesh point count.
+    std::vector<size_t> levelOriginalSize; //!< Original point count per runLevel target layer (coarse->fine).
+    std::vector<std::vector<size_t>> levelFineMeshSize; //!< Per-query per-level fineGrid nnz after each runLevel.
+    std::vector<long> queryTimeUs; //!< Per-query runtime in microseconds.
     std::vector<SparseGrid*> fineMesh; //!< Per-query fine-mesh grids (when saveFineMesh).
     std::vector<bool> fineMeshOwnsIds; //!< Ownership flag for ids_ of each fine mesh.
+    std::vector<bool> fineMeshOwnsVals; //!< Ownership flag for vals_ of each fine mesh.
     std::vector<bool> fineMeshOnHost; //!< True when the fine mesh is host-resident (L3).
 };
 
@@ -111,10 +115,12 @@ private:
      * @param[in]     hi         Upper bounds of the query box (RANGE only).
      * @param[in]     queryPoint Query point coordinates (KNN only).
      * @param[in]     K          Number of nearest neighbours (KNN only).
+     * @param[out]    levelFineMeshSize Optional output array for per-level fineGrid nnz.
      * @return LevelResult from the finest level, representing the query output.
      */
     static LevelResult runSingleQuery(IndexData& idx, QueryType qType, const double* lo, const double* hi,
-                                      const double* queryPoint, size_t K);
+                                      const double* queryPoint, size_t K,
+                                      size_t* levelFineMeshSize);
 };
 
 /*!
