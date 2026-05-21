@@ -87,6 +87,22 @@ After building, run the program from the build directory:
 ./T-BLAEQ --test-query -i indexes/my_index/ -f queries/range_50.txt -t 0 -r results.csv --force-policy L1
 ```
 
+### JSONL Index + T-BLAEQ Tool
+
+Build a JSONL index (with binary payloads) and a co-located T-BLAEQ index:
+```bash
+./T-BLAEQ-JsonIndex build <dataset_root> <coord.csv> <index_root> --height 4 --ratios 100,50,20
+```
+
+Query the combined indexes (T-BLAEQ coarse, JSONL refine, payload dump):
+```bash
+./T-BLAEQ-JsonIndex query <index_root> --mode knn --timestamp 1715064123.123456 --seq seq0001 --knn-k 10
+./T-BLAEQ-JsonIndex query <index_root> --mode range --start 1715064100.0 --end 1715064200.0 --seq 1
+```
+
+Note: The JSONL group size (N) and fixed file-name bytes are compile-time constants in
+`src/IndexJsonTblaeqTool.cpp` (`kGroupSize`, `kFileNameBytes`).
+
 ### C++ API Usage
 
 You can also integrate T-BLAEQ directly into your own C++ applications:
