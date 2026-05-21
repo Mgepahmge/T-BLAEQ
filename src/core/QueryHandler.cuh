@@ -62,6 +62,20 @@ public:
                           const std::vector<size_t>& ratios = IndexBuilder::kDefaultRatios);
 
     /*!
+     * @brief Build a new index from an in-memory PointCloud.
+     *
+     * @param[in] dataset In-memory dataset in AOS layout (N * D doubles).
+     * @param[in] name    Human-readable label stored in IndexData for logging.
+     * @param[in] forceUseCPU
+     * @param[in] height  Total number of mesh levels.
+     * @param[in] ratios  Coarsening ratio per level; length must equal height - 1.
+     */
+    explicit QueryHandler(bool forceUseCPU, const PointCloud& dataset,
+                          const std::string& name = "in-memory",
+                          size_t height = IndexBuilder::kDefaultHeight,
+                          const std::vector<size_t>& ratios = IndexBuilder::kDefaultRatios);
+
+    /*!
      * @brief Build an index from randomly generated synthetic data.
      *
      * @details Uses IndexBuilder::buildRandom() to generate a synthetic

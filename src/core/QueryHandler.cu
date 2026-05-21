@@ -28,6 +28,31 @@ QueryHandler::QueryHandler(const bool forceUseCPU, const std::string& datasetPat
     Chrono::printElapsed("Index build total", t0, t1);
 }
 
+QueryHandler::QueryHandler(const bool forceUseCPU, const PointCloud& dataset, const std::string& name,
+                           const size_t height, const std::vector<size_t>& ratios) {
+    if (dataset.data == nullptr || dataset.size <= 0 || dataset.dim <= 0) {
+        throw std::invalid_argument("QueryHandler: dataset is empty or invalid");
+    }
+
+    std::cout << "T-BLAEQ: building index from in-memory PointCloud (N=" << dataset.size
+              << " D=" << dataset.dim << " name=" << name << ")\n";
+    std::cout << "Build config: height=" << height << " ratios=[";
+    for (size_t i = 0; i < ratios.size(); ++i) {
+        if (i) {
+            std::cout << ",";
+        }
+        std::cout << ratios[i];
+    }
+    std::cout << "]\n";
+
+    const auto t0 = std::chrono::steady_clock::now();
+    idx_.reset(IndexBuilder::build(dataset.data, static_cast<size_t>(dataset.size),
+                                   static_cast<size_t>(dataset.dim), name, forceUseCPU, height, ratios));
+    idx_->datasetName = name;
+    const auto t1 = std::chrono::steady_clock::now();
+    Chrono::printElapsed("Index build total", t0, t1);
+}
+
 QueryHandler::QueryHandler(size_t N, size_t D, double valMin, double valMax, bool isInt, size_t height,
                            const std::vector<size_t>& ratios, uint64_t seed, double sigmaDivisor,
                            const std::string& name) {
