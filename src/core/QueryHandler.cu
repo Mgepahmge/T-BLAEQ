@@ -5,24 +5,72 @@
 #include "src/func.hpp"
 #include "src/utils/Utils.cuh"
 
-QueryHandler::QueryHandler(const bool forceUseCPU, const std::string& datasetPath,
-                           const size_t height, const std::vector<size_t>& ratios) {
-    std::cout << "T-BLAEQ: building index from " << datasetPath << "\n";
-    std::cout << "Build config: height=" << height << " ratios=[";
+namespace {
+
+struct BuildPlan {
+    size_t height = 0;
+    std::vector<size_t> ratios;
+    bool truncated = false;
+};
+
+size_t computeCentroidCountSim(size_t dataNums, size_t ratio) {
+    if (ratio == 0 || dataNums / ratio == 0) {
+        return 1;
+    }
+    return dataNums / ratio;
+}
+
+BuildPlan adjustBuildPlan(size_t N, size_t height, const std::vector<size_t>& ratios) {
+    if (height < 2) {
+        throw std::invalid_argument("QueryHandler: height must be >= 2");
+    }
+    if (ratios.size() != height - 1) {
+        throw std::invalid_argument("QueryHandler: ratios size must equal height - 1");
+    }
+    size_t dataNums = N;
+    size_t keep = ratios.size();
     for (size_t i = 0; i < ratios.size(); ++i) {
+        const size_t centroidNums = computeCentroidCountSim(dataNums, ratios[i]);
+        if (centroidNums == 1) {
+            keep = i + 1;
+            break;
+        }
+        dataNums = centroidNums;
+    }
+    BuildPlan plan;
+    plan.height = keep + 1;
+    plan.ratios.assign(ratios.begin(), ratios.begin() + static_cast<long>(keep));
+    plan.truncated = (keep != ratios.size());
+    return plan;
+}
+
+void printBuildConfig(const BuildPlan& plan) {
+    std::cout << "Build config: height=" << plan.height << " ratios=[";
+    for (size_t i = 0; i < plan.ratios.size(); ++i) {
         if (i) {
             std::cout << ",";
         }
-        std::cout << ratios[i];
+        std::cout << plan.ratios[i];
     }
     std::cout << "]\n";
+}
 
+} // namespace
+
+QueryHandler::QueryHandler(const bool forceUseCPU, const std::string& datasetPath,
+                           const size_t height, const std::vector<size_t>& ratios) {
+    std::cout << "T-BLAEQ: building index from " << datasetPath << "\n";
     const std::string name = extractDatasetName(datasetPath);
     const PointCloud dataset = loadFromFile(datasetPath);
+    const BuildPlan plan = adjustBuildPlan(static_cast<size_t>(dataset.size), height, ratios);
+    if (plan.truncated) {
+        std::cout << "Truncating build plan to avoid degenerate top layer.\n";
+    }
+    printBuildConfig(plan);
 
     const auto t0 = std::chrono::steady_clock::now();
     idx_.reset(IndexBuilder::build(dataset.data, static_cast<size_t>(dataset.size), static_cast<size_t>(dataset.dim),
-                                   name, forceUseCPU, height, ratios));
+                                   name, forceUseCPU, plan.height, plan.ratios));
     idx_->datasetName = extractDatasetName(datasetPath);
     const auto t1 = std::chrono::steady_clock::now();
     Chrono::printElapsed("Index build total", t0, t1);
@@ -36,18 +84,15 @@ QueryHandler::QueryHandler(const bool forceUseCPU, const PointCloud& dataset, co
 
     std::cout << "T-BLAEQ: building index from in-memory PointCloud (N=" << dataset.size
               << " D=" << dataset.dim << " name=" << name << ")\n";
-    std::cout << "Build config: height=" << height << " ratios=[";
-    for (size_t i = 0; i < ratios.size(); ++i) {
-        if (i) {
-            std::cout << ",";
-        }
-        std::cout << ratios[i];
+    const BuildPlan plan = adjustBuildPlan(static_cast<size_t>(dataset.size), height, ratios);
+    if (plan.truncated) {
+        std::cout << "Truncating build plan to avoid degenerate top layer.\n";
     }
-    std::cout << "]\n";
+    printBuildConfig(plan);
 
     const auto t0 = std::chrono::steady_clock::now();
     idx_.reset(IndexBuilder::build(dataset.data, static_cast<size_t>(dataset.size),
-                                   static_cast<size_t>(dataset.dim), name, forceUseCPU, height, ratios));
+                                   static_cast<size_t>(dataset.dim), name, forceUseCPU, plan.height, plan.ratios));
     idx_->datasetName = name;
     const auto t1 = std::chrono::steady_clock::now();
     Chrono::printElapsed("Index build total", t0, t1);
@@ -58,17 +103,21 @@ QueryHandler::QueryHandler(size_t N, size_t D, double valMin, double valMax, boo
                            const std::string& name) {
     std::cout << "T-BLAEQ: generating random index (N=" << N << " D=" << D << " range=["
               << valMin << "," << valMax << "] " << (isInt ? "int" : "float") << ")\n";
-    std::cout << "RandomKmeans config: height=" << height << " ratios=[";
-    for (size_t i = 0; i < ratios.size(); ++i) {
+    const BuildPlan plan = adjustBuildPlan(N, height, ratios);
+    if (plan.truncated) {
+        std::cout << "Truncating build plan to avoid degenerate top layer.\n";
+    }
+    std::cout << "RandomKmeans config: height=" << plan.height << " ratios=[";
+    for (size_t i = 0; i < plan.ratios.size(); ++i) {
         if (i) {
             std::cout << ",";
         }
-        std::cout << ratios[i];
+        std::cout << plan.ratios[i];
     }
     std::cout << "] seed=" << seed << " sigmaDivisor=" << sigmaDivisor << "\n";
 
     const auto t0 = std::chrono::steady_clock::now();
-    idx_.reset(IndexBuilder::buildRandom(N, D, valMin, valMax, isInt, name, height, ratios, seed, sigmaDivisor));
+    idx_.reset(IndexBuilder::buildRandom(N, D, valMin, valMax, isInt, name, plan.height, plan.ratios, seed, sigmaDivisor));
     idx_->datasetName = "Gen" + std::to_string(N) + "D" + std::to_string(D);
     const auto t1 = std::chrono::steady_clock::now();
     Chrono::printElapsed("Index build total", t0, t1);
