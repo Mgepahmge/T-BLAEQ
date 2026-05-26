@@ -97,7 +97,7 @@ Build a JSONL index (with binary payloads) and a co-located T-BLAEQ index:
 Query the combined indexes (T-BLAEQ coarse, JSONL refine, payload dump):
 ```bash
 ./T-BLAEQ-JsonIndex query <index_root> --mode knn --timestamp 1715064123.123456 --seq seq0001 --knn-k 10
-./T-BLAEQ-JsonIndex query <index_root> --mode range --start 1715064100.0 --end 1715064200.0 --seq 1
+./T-BLAEQ-JsonIndex query <index_root> --mode range --start 1715064100.0 --end 1715064200.0 --seq 1,2
 ```
 
 Note: The JSONL group size (N) and fixed file-name bytes are compile-time constants in
