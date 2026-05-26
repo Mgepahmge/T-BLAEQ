@@ -111,7 +111,7 @@ add_executable(T-BLAEQ-LayoutTest
 )
 
 add_executable(T-BLAEQ-JsonIndex
-        src/IndexJsonTblaeqTool.cpp
+        src/IndexJsonTblaeqTool.cu
         ${CORE_SOURCES}
         ${DS_SOURCES}
         ${KERNEL_SOURCES}
