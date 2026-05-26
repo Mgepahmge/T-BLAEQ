@@ -101,7 +101,7 @@ Query the combined indexes (T-BLAEQ coarse, JSONL refine, payload dump):
 ```
 
 Note: The JSONL group size (N) and fixed file-name bytes are compile-time constants in
-`src/IndexJsonTblaeqTool.cpp` (`kGroupSize`, `kFileNameBytes`).
+`src/file_index/IndexJsonTblaeqTypes.cuh` (`kGroupSize`, `kFileNameBytes`).
 
 ### C++ API Usage
 
