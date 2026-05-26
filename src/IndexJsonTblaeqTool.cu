@@ -27,6 +27,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1128,7 +1129,9 @@ namespace {
         return sort_limit_by_diff(std::move(matches), top_k);
     }
 
-    std::vector<uint8_t> read_payload_checked(const fs::path& output_dir, const IndexRecordFixed& rec, uint8_t slot) {
+    [[maybe_unused]] std::vector<uint8_t> read_payload_checked(const fs::path& output_dir,
+                                                               const IndexRecordFixed& rec,
+                                                               uint8_t slot) {
         if (slot >= rec.slot_count) throw std::runtime_error("slot out of range");
         uint64_t start_rel = rec.data_offsets[slot];
         uint64_t end_rel = rec.data_offsets[slot + 1];
@@ -1173,26 +1176,149 @@ namespace {
         return ".bin";
     }
 
+    uint64_t checked_add_u64(uint64_t a, uint64_t b, const std::string& ctx) {
+        if (a > std::numeric_limits<uint64_t>::max() - b) throw std::runtime_error(ctx);
+        return a + b;
+    }
+
+    struct PayloadRange {
+        fs::path data_path;
+        uint64_t abs_start = 0;
+        uint64_t size = 0;
+    };
+
+    PayloadRange payload_range_checked(const fs::path& index_dir, const IndexRecordFixed& rec, uint8_t slot) {
+        if (slot >= rec.slot_count) throw std::runtime_error("slot out of range");
+        uint64_t start_rel = rec.data_offsets[slot];
+        uint64_t end_rel = rec.data_offsets[slot + 1];
+        if (end_rel < start_rel) throw std::runtime_error("invalid data_offsets for slot");
+        uint64_t size = end_rel - start_rel;
+        uint64_t data_base = rec.index_copy_offset + rec.binary_index_record_size;
+        if (data_base < rec.index_copy_offset) throw std::runtime_error("data_base overflow");
+        uint64_t abs_start = checked_add_u64(data_base, start_rel, "payload offset overflow");
+        fs::path data_path = index_dir / fixed_file_name_to_string(rec.file_name);
+        return PayloadRange{std::move(data_path), abs_start, size};
+    }
+
+    struct PayloadRequest {
+        size_t match_idx = 0;
+        uint64_t abs_start = 0;
+        uint64_t size = 0;
+    };
+
+    struct FileRequests {
+        fs::path path;
+        uint64_t file_size = 0;
+        std::vector<PayloadRequest> requests;
+    };
+
+    fs::path build_dump_path(const fs::path& dump_dir, size_t rank, const IndexRecordFixed& rec,
+                             const SlotRef& slot_ref) {
+        std::ostringstream name;
+        name << "match_" << std::setw(4) << std::setfill('0') << rank
+            << "_item" << std::setw(8) << std::setfill('0') << rec.item_no
+            << "_slot" << std::setw(3) << std::setfill('0') << static_cast<int>(slot_ref.slot)
+            << "_seq" << std::setw(4) << std::setfill('0') << static_cast<int>(rec.seq)
+            << "_dtype" << static_cast<int>(rec.dtype)
+            << "_" << safe_timestamp(slot_ref.timestamp) << extension_for_type(rec.dtype);
+        return dump_dir / name.str();
+    }
+
     void dump_payloads(const fs::path& index_dir, const fs::path& dump_dir,
                        const std::vector<IndexRecordFixed>& records,
                        const std::vector<Match>& matches) {
         fs::create_directories(dump_dir);
+        if (matches.empty()) return;
+
+        std::vector<fs::path> out_paths(matches.size());
+        std::unordered_map<std::string, FileRequests> grouped;
+        grouped.reserve(matches.size());
+
         for (size_t rank = 0; rank < matches.size(); ++rank) {
             const auto& s = matches[rank].slot_ref;
             const auto& rec = records[s.record_idx];
-            std::vector<uint8_t> payload = read_payload_checked(index_dir, rec, s.slot);
-            std::ostringstream name;
-            name << "match_" << std::setw(4) << std::setfill('0') << rank
-                << "_item" << std::setw(8) << std::setfill('0') << rec.item_no
-                << "_slot" << std::setw(3) << std::setfill('0') << static_cast<int>(s.slot)
-                << "_seq" << std::setw(4) << std::setfill('0') << static_cast<int>(rec.seq)
-                << "_dtype" << static_cast<int>(rec.dtype)
-                << "_" << safe_timestamp(s.timestamp) << extension_for_type(rec.dtype);
-            fs::path out_path = dump_dir / name.str();
-            std::ofstream out(out_path, std::ios::binary);
-            if (!out) throw std::runtime_error("failed to open dump file: " + out_path.string());
-            if (!payload.empty()) out.write(reinterpret_cast<const char*>(payload.data()),
-                                            static_cast<std::streamsize>(payload.size()));
+            out_paths[rank] = build_dump_path(dump_dir, rank, rec, s);
+            PayloadRange range = payload_range_checked(index_dir, rec, s.slot);
+            const std::string key = range.data_path.string();
+            auto& group = grouped[key];
+            if (group.path.empty()) group.path = range.data_path;
+            group.requests.push_back(PayloadRequest{rank, range.abs_start, range.size});
+        }
+
+        for (auto& kv : grouped) {
+            FileRequests& group = kv.second;
+            if (!fs::exists(group.path)) throw std::runtime_error("data file not found: " + group.path.string());
+            group.file_size = static_cast<uint64_t>(fs::file_size(group.path));
+            for (const auto& req : group.requests) {
+                if (req.abs_start > group.file_size || req.size > group.file_size - req.abs_start) {
+                    std::ostringstream oss;
+                    oss << "payload range exceeds data file length: file=" << group.path
+                        << " abs_start=" << req.abs_start << " size=" << req.size
+                        << " file_size=" << group.file_size;
+                    throw std::runtime_error(oss.str());
+                }
+            }
+        }
+
+        for (auto& kv : grouped) {
+            FileRequests& group = kv.second;
+            std::ifstream in(group.path, std::ios::binary);
+            if (!in) throw std::runtime_error("failed to open data file: " + group.path.string());
+            auto& reqs = group.requests;
+            std::sort(reqs.begin(), reqs.end(), [](const PayloadRequest& a, const PayloadRequest& b) {
+                return a.abs_start < b.abs_start;
+            });
+
+            size_t i = 0;
+            while (i < reqs.size()) {
+                uint64_t span_start = reqs[i].abs_start;
+                uint64_t span_end = checked_add_u64(span_start, reqs[i].size, "payload span overflow");
+                size_t j = i + 1;
+                while (j < reqs.size()) {
+                    uint64_t next_start = reqs[j].abs_start;
+                    uint64_t next_end = checked_add_u64(next_start, reqs[j].size, "payload span overflow");
+                    if (next_start <= span_end) {
+                        if (next_end > span_end) span_end = next_end;
+                        ++j;
+                    }
+                    else break;
+                }
+
+                uint64_t span_size64 = span_end - span_start;
+                if (span_size64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                    throw std::runtime_error("payload span too large to buffer");
+                }
+                std::vector<uint8_t> buffer(static_cast<size_t>(span_size64));
+                if (span_size64 > 0) {
+                    in.clear();
+                    in.seekg(static_cast<std::streamoff>(span_start), std::ios::beg);
+                    in.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+                    if (in.gcount() != static_cast<std::streamsize>(buffer.size())) {
+                        throw std::runtime_error("short payload read after length check");
+                    }
+                }
+
+                for (size_t k = i; k < j; ++k) {
+                    const auto& req = reqs[k];
+                    fs::path out_path = out_paths[req.match_idx];
+                    std::ofstream out(out_path, std::ios::binary);
+                    if (!out) throw std::runtime_error("failed to open dump file: " + out_path.string());
+                    if (req.size == 0) continue;
+                    uint64_t offset64 = req.abs_start - span_start;
+                    if (offset64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                        throw std::runtime_error("payload offset too large to buffer");
+                    }
+                    if (req.size > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) - offset64) {
+                        throw std::runtime_error("payload size too large to buffer");
+                    }
+                    size_t offset = static_cast<size_t>(offset64);
+                    size_t size = static_cast<size_t>(req.size);
+                    if (offset + size > buffer.size()) throw std::runtime_error("payload slice exceeds buffer");
+                    out.write(reinterpret_cast<const char*>(buffer.data() + offset),
+                              static_cast<std::streamsize>(size));
+                }
+                i = j;
+            }
         }
     }
 
