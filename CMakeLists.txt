@@ -126,6 +126,22 @@ add_executable(T-BLAEQ-JsonIndex
         ${UTIL_SOURCES}
 )
 
+add_executable(T-BLAEQ-JsonIndex-Server
+        src/IndexJsonTblaeqServer.cu
+        src/file_index/IndexJsonTblaeqBuild.cu
+        src/file_index/IndexJsonTblaeqQuery.cu
+        src/file_index/IndexJsonTblaeqJson.cu
+        src/file_index/IndexJsonTblaeqUtils.cu
+        ${CORE_SOURCES}
+        ${DS_SOURCES}
+        ${KERNEL_SOURCES}
+        ${MERGE_SORT_SOURCES}
+        ${QUERY_KERNEL_SOURCES}
+        ${SETUP_SOURCES}
+        ${KMEANS_CUDA_SOURCES}
+        ${UTIL_SOURCES}
+)
+
 target_include_directories(T-BLAEQ PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -139,6 +155,10 @@ target_include_directories(T-BLAEQ-LayoutTest PRIVATE
 )
 
 target_include_directories(T-BLAEQ-JsonIndex PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_include_directories(T-BLAEQ-JsonIndex-Server PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -167,6 +187,14 @@ target_link_libraries(T-BLAEQ-LayoutTest PRIVATE
 )
 
 target_link_libraries(T-BLAEQ-JsonIndex PRIVATE
+        CUDA::cudart_static
+        CUDA::cusparse
+        CUDA::cublas
+        OpenMP::OpenMP_CXX
+        cuvs::cuvs
+)
+
+target_link_libraries(T-BLAEQ-JsonIndex-Server PRIVATE
         CUDA::cudart_static
         CUDA::cusparse
         CUDA::cublas
@@ -205,6 +233,16 @@ target_compile_options(T-BLAEQ-LayoutTest PRIVATE
 )
 
 target_compile_options(T-BLAEQ-JsonIndex PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:
+        --expt-relaxed-constexpr
+        --extended-lambda
+        -Xcompiler=-Wall
+        -Xcompiler=-fopenmp
+        >
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+)
+
+target_compile_options(T-BLAEQ-JsonIndex-Server PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
         --expt-relaxed-constexpr
         --extended-lambda

@@ -291,6 +291,94 @@ namespace {
     }
 } // namespace
 
+QueryServiceResult run_query_service(const QueryArgs& args, QueryHandler& handler) {
+    fs::path index_root(args.index_root);
+    fs::path index_dir = index_root / args.index_dir;
+    Meta meta = load_meta(index_dir);
+
+    std::vector<uint8_t> seqs = args.seqs;
+    if (!seqs.empty()) {
+        std::sort(seqs.begin(), seqs.end());
+        seqs.erase(std::unique(seqs.begin(), seqs.end()), seqs.end());
+    }
+
+    std::vector<size_t> candidates;
+    if (args.mode == "knn") {
+        if (!args.has_timestamp) throw std::runtime_error("--timestamp is required for knn mode");
+        if (!args.has_seq || seqs.size() != 1) {
+            throw std::runtime_error("--seq must specify exactly one value for knn mode");
+        }
+        if (args.knn_k == 0) throw std::runtime_error("--knn-k must be > 0 for knn mode");
+        auto v3 = split_timestamp_3d(args.timestamp);
+        std::vector<double> query_point = {v3[0], v3[1], v3[2], static_cast<double>(seqs[0])};
+        QueryResult result = handler.performSingleKNNQuery(query_point, args.knn_k, /*saveFineMesh=*/true);
+        candidates = extract_candidate_indices(result);
+    }
+    else if (args.mode == "range") {
+        if (!args.has_start || !args.has_end) throw std::runtime_error(
+            "--start and --end are required for range mode");
+        if (!args.has_seq || seqs.empty()) throw std::runtime_error("--seq is required for range mode");
+        if (args.end < args.start) throw std::runtime_error("--end must be >= --start");
+        auto v3_start = split_timestamp_3d(args.start);
+        auto v3_end = split_timestamp_3d(args.end);
+        std::vector<double> lower(4);
+        std::vector<double> upper(4);
+        for (size_t i = 0; i < 3; ++i) {
+            lower[i] = std::min(v3_start[i], v3_end[i]);
+            upper[i] = std::max(v3_start[i], v3_end[i]);
+        }
+        lower[3] = static_cast<double>(seqs.front());
+        upper[3] = static_cast<double>(seqs.back());
+        QueryResult result = handler.performSingleRangeQuery(upper, lower, /*saveFineMesh=*/true);
+        candidates = extract_candidate_indices(result);
+    }
+    else {
+        throw std::runtime_error("unsupported mode: " + args.mode);
+    }
+
+    QueryServiceResult out;
+    out.candidate_count = candidates.size();
+    if (candidates.empty()) return out;
+
+    std::vector<IndexRecordFixed> records = load_candidate_records(index_dir, meta, candidates);
+    out.record_count = records.size();
+    std::vector<Match> matches;
+    if (args.mode == "knn") {
+        int64_t target = timestamp_to_us(args.timestamp);
+        matches = build_matches_knn(records, seqs[0], args.include_padding, target, args.knn_k);
+    }
+    else {
+        int64_t lo = timestamp_to_us(args.start);
+        int64_t hi = timestamp_to_us(args.end);
+        std::vector<SlotRef> slots = build_slots_for_records(records, seqs, args.include_padding);
+        out.slot_count = slots.size();
+        matches = query_interval(slots, lo, hi, args.range_limit);
+    }
+
+    out.matches.reserve(matches.size());
+    for (size_t rank = 0; rank < matches.size(); ++rank) {
+        const auto& match = matches[rank];
+        const auto& slot_ref = match.slot_ref;
+        const auto& rec = records[slot_ref.record_idx];
+        PayloadRange range = payload_range_checked(index_dir, rec, slot_ref.slot);
+
+        QueryPayloadMatch payload;
+        payload.rank = rank;
+        payload.item_no = rec.item_no;
+        payload.seq = rec.seq;
+        payload.dtype = rec.dtype;
+        payload.slot = slot_ref.slot;
+        payload.timestamp = slot_ref.timestamp;
+        payload.diff_us = match.diff_us;
+        payload.payload_offset = range.abs_start;
+        payload.payload_size = range.size;
+        payload.data_file = range.data_path.filename().string();
+        out.matches.push_back(std::move(payload));
+    }
+
+    return out;
+}
+
 int run_query(QueryArgs args) {
     fs::path index_root(args.index_root);
     fs::path index_dir = index_root / args.index_dir;

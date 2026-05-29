@@ -103,6 +103,32 @@ Query the combined indexes (T-BLAEQ coarse, JSONL refine, payload dump):
 Note: The JSONL group size (N) and fixed file-name bytes are compile-time constants in
 `src/file_index/IndexJsonTblaeqTypes.cuh` (`kGroupSize`, `kFileNameBytes`).
 
+### JSONL Index HTTP Server
+
+Start the server (JSONL index + T-BLAEQ coarse search, binary payload streaming):
+```bash
+./T-BLAEQ-JsonIndex-Server --host 0.0.0.0 --port 8090 --index-cache ./tempJsonIndexCache
+```
+
+Build an index via HTTP:
+```bash
+curl -X POST http://localhost:8090/build-index \
+  -H "Content-Type: application/json" \
+  -d '{"dataset_name":"demo","dataset_root":"/data/demo","csv_path":"/data/demo/coord.csv","height":4,"ratios":"100,50,20"}'
+```
+
+Query (returns payload offsets + URLs for binary fetch):
+```bash
+curl -X POST http://localhost:8090/query \
+  -H "Content-Type: application/json" \
+  -d '{"dataset_name":"demo","mode":"knn","timestamp":1715064123.123456,"seq":"seq0001","knn_k":10}'
+```
+
+Fetch payload bytes (binary):
+```bash
+curl "http://localhost:8090/payload?dataset_name=demo&data_file=data_0000.bin&offset=1024&size=2048" --output payload.bin
+```
+
 ### C++ API Usage
 
 You can also integrate T-BLAEQ directly into your own C++ applications:
